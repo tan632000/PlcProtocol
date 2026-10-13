@@ -12,3 +12,12 @@ plans/*
 .codex/
 .omp/
 .agents/
+
+# .NET build output
+bin/
+obj/
+*.user
+TestResults/
+
+# Secrets: TLS certificates/keys must never be committed
+deployments/**/certs/

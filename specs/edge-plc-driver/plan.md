@@ -66,7 +66,7 @@ docs/plc-setup.md
 | 01 | Solution skeleton + S7 address parser | P1 | AC-01 | root build files, all 4 `*.csproj`, `src/Edge/Program.cs`, `src/Edge/Drivers/PlcException.cs`, `src/Edge/Drivers/Models/PlcA*.cs`, `tests/Edge.Tests/PlcAddressParserTests.cs` | - | done |
 | 02 | Shared message contracts | P1 | AC-02, AC-03 | `src/Shared/{Contracts,Common}/**`, `tests/Shared.Tests/**` | task-01 | done |
 | 03 | Value conversion, `IPlcDriver`, tag catalog | P1 | AC-04, AC-05 | `src/Edge/Drivers/{PlcDataType,PlcValueConverter,IPlcDriver,PlcExceptions,PlcTagCatalog}.cs`, `Drivers/Models/PlcTagDefinition.cs`, matching tests | task-01, task-02 | done |
-| 04 | `SiemensS7Driver` + PLC setup doc | P1 | AC-06, AC-07, AC-08 | `src/Edge/Drivers/{SiemensS7Options,SiemensS7Driver,DriverServiceCollectionExtensions}.cs`, `tests/Edge.Tests/{SiemensS7DriverTests.cs,Fakes/}`, `docs/plc-setup.md` | task-03 | blocked |
+| 04 | `SiemensS7Driver` + PLC setup doc | P1 | AC-06, AC-07, AC-08 | `src/Edge/Drivers/{SiemensS7Options,SiemensS7Driver,DriverServiceCollectionExtensions}.cs`, `tests/Edge.Tests/{SiemensS7DriverTests.cs,Fakes/}`, `docs/plc-setup.md` | task-03 | done |
 
 ## Review log
 - Round 1 (paper): 3 fresh reviewers (2 on predecessor `plc-s7-base-core`, 1 on new contracts/catalog), 22 raw findings → 15 after dedupe; 4 API/HTTP-only findings (fallback auth policy, `/health/ready` I/O, HTTPS/audit identity, WebApplicationFactory config timing) deferred to wave 3 `cloud-platform`.

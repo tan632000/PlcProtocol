@@ -4,4 +4,8 @@
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.12" />
   </ItemGroup>
 
+  <ItemGroup>
+    <ProjectReference Include="..\Shared\IndustrialIot.Shared.csproj" />
+  </ItemGroup>
+
 </Project>

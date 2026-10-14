@@ -65,7 +65,7 @@ docs/plc-setup.md
 |---|---|---|---|---|---|---|
 | 01 | Solution skeleton + S7 address parser | P1 | AC-01 | root build files, all 4 `*.csproj`, `src/Edge/Program.cs`, `src/Edge/Drivers/PlcException.cs`, `src/Edge/Drivers/Models/PlcA*.cs`, `tests/Edge.Tests/PlcAddressParserTests.cs` | - | done |
 | 02 | Shared message contracts | P1 | AC-02, AC-03 | `src/Shared/{Contracts,Common}/**`, `tests/Shared.Tests/**` | task-01 | done |
-| 03 | Value conversion, `IPlcDriver`, tag catalog | P1 | AC-04, AC-05 | `src/Edge/Drivers/{PlcDataType,PlcValueConverter,IPlcDriver,PlcExceptions,PlcTagCatalog}.cs`, `Drivers/Models/PlcTagDefinition.cs`, matching tests | task-01, task-02 | blocked |
+| 03 | Value conversion, `IPlcDriver`, tag catalog | P1 | AC-04, AC-05 | `src/Edge/Drivers/{PlcDataType,PlcValueConverter,IPlcDriver,PlcExceptions,PlcTagCatalog}.cs`, `Drivers/Models/PlcTagDefinition.cs`, matching tests | task-01, task-02 | done |
 | 04 | `SiemensS7Driver` + PLC setup doc | P1 | AC-06, AC-07, AC-08 | `src/Edge/Drivers/{SiemensS7Options,SiemensS7Driver,DriverServiceCollectionExtensions}.cs`, `tests/Edge.Tests/{SiemensS7DriverTests.cs,Fakes/}`, `docs/plc-setup.md` | task-03 | blocked |
 
 ## Review log

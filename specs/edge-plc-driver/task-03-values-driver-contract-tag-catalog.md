@@ -1,6 +1,6 @@
 # Task 03 — Typed values convert to S7 bytes, and the tag catalog decides writability without I/O
 
-Status: blocked
+Status: done
 
 ## Outcome
 Edge Drivers expose `PlcDataType`, a big-endian value converter with range validation, the `IPlcDriver` contract, the PLC exception hierarchy, `PlcTagDefinition`, and a fail-closed `PlcTagCatalog`, all proven by unit tests.
@@ -84,4 +84,27 @@ Task<bool> IsReachableAsync(CancellationToken ct);
 On a failed Step or Verification Plan run: stop; do not widen scope, change the Command, or weaken a test; record observed versus expected; repair only the cited cause; after three failed rounds, stop and ask the user.
 
 ## Receipt
-<!-- Fill only after execution; see canonical form in templates. -->
+
+Verification: PASS
+Command: dotnet test tests/Edge.Tests --filter "FullyQualifiedName~PlcValueConverterTests|FullyQualifiedName~PlcTagCatalogTests"
+Exit: 0
+Base: 6cb3c9d095f27b39d24b5e0cf6c6dce3da71f888
+Head: 61a0fc812669112be4a75169ce18c8465828b297ec7f040ae678b3b714332c45
+```text
+$ dotnet test tests/Edge.Tests --filter "FullyQualifiedName~PlcValueConverterTests|FullyQualifiedName~PlcTagCatalogTests"
+  Determining projects to restore...
+  All projects are up-to-date for restore.
+  IndustrialIot.Shared -> C:\Users\HOME\source\repos\PLCProtocol\src\Shared\bin\Debug\net10.0\IndustrialIot.Shared.dll
+  IndustrialIot.Edge -> C:\Users\HOME\source\repos\PLCProtocol\src\Edge\bin\Debug\net10.0\IndustrialIot.Edge.dll
+  Edge.Tests -> C:\Users\HOME\source\repos\PLCProtocol\tests\Edge.Tests\bin\Debug\net10.0\Edge.Tests.dll
+Test run for C:\Users\HOME\source\repos\PLCProtocol\tests\Edge.Tests\bin\Debug\net10.0\Edge.Tests.dll (.NETCoreApp,Version=v10.0)
+A total of 1 test files matched the specified pattern.
+
+Passed!  - Failed:     0, Passed:   154, Skipped:     0, Total:   154, Duration: 65 ms - Edge.Tests.dll (net10.0)
+```
+- Pre-change run: exit 0 with `No test matches the given testcase filter` (0 tests) → oracle (eight named probes) not met, as expected.
+- Status moved from `blocked` to `in_progress`: the only blocker (missing .NET 10 SDK) is closed — `dotnet --list-sdks` → `10.0.401`.
+- Named probes discovered via `--list-tests`: all eight present (`EnsureCompatible_SizeMismatch_Throws` 23 rows, `Normalize_OutOfRange_Throws` 14, `Normalize_IntegerToken_Rule` 13, `ToBytes_BigEndianExamples` 8, `Empty_DeniesAll`, `EvaluateWrite_ReasonCodes` 24, `InvalidCatalog_ThrowsAtConstruction`, `Overlap_WritableTag_Throws`; the last two run every MemberData row inside one test case).
+- Build: `dotnet build IndustrialIot.sln` → 0 errors (TreatWarningsAsErrors).
+- Repair rounds: 0.
+- Review: code-auditor PASS (0 Critical/High/Medium). Low items kept as known limitations: Real Min/Max compared in float precision (a decimal Max 0.1 admits 0.1f); Real accepts IEEE754 underflow/rounding (`1e-50` → 0); `PlcValueException` messages embed the raw JSON number untruncated (swallowed by `EvaluateWrite`; truncate before logging in task-04/wave 2); no test for read-only Input tag with Min/Max (accepted, harmless).

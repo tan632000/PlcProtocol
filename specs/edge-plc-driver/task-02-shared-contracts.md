@@ -1,6 +1,6 @@
 # Task 02 — Edge⇄Cloud message contracts serialize deterministically and expose freshness checks
 
-Status: blocked
+Status: done
 
 ## Outcome
 `src/Shared` defines `TelemetryPayload`, `DeviceCommand`, `CommandResult`, their enums, the shared reason-code constants, and one shared JSON configuration, so Edge (wave 2) and Cloud (wave 3) exchange identical wire formats proven by round-trip tests.
@@ -93,4 +93,27 @@ Status: blocked
 On a failed Step or Verification Plan run: stop; do not widen scope, change the Command, or weaken a test; record observed versus expected; repair only the cited cause; after three failed rounds, stop and ask the user.
 
 ## Receipt
-<!-- Fill only after execution; see canonical form in templates. -->
+
+Verification: PASS
+Command: dotnet test tests/Shared.Tests
+Exit: 0
+Base: bccfdfd166a07c585ae473e37fba1f71a20e6e81
+Head: 71c866176e0becd223b8ad6b81245d4bc19b43de71d5bdace928c76362b002e4
+```text
+$ dotnet test tests/Shared.Tests
+  Determining projects to restore...
+  All projects are up-to-date for restore.
+  IndustrialIot.Shared -> C:\Users\HOME\source\repos\PLCProtocol\src\Shared\bin\Debug\net10.0\IndustrialIot.Shared.dll
+  Shared.Tests -> C:\Users\HOME\source\repos\PLCProtocol\tests\Shared.Tests\bin\Debug\net10.0\Shared.Tests.dll
+Test run for C:\Users\HOME\source\repos\PLCProtocol\tests\Shared.Tests\bin\Debug\net10.0\Shared.Tests.dll (.NETCoreApp,Version=v10.0)
+A total of 1 test files matched the specified pattern.
+
+Passed!  - Failed:     0, Passed:    47, Skipped:     0, Total:    47, Duration: 489 ms - Shared.Tests.dll (net10.0)
+```
+- Pre-change run: exit 0 with `No test is available` (0 tests) → oracle (five named probes) not met, as expected.
+- Named probes discovered via `--list-tests`: `RoundTrip_Equal`, `FieldNames_MatchSchema`, `Invalid_ThrowsValidation` (34 rows), `Boundaries`, `All_ExactSetUniqueSnakeCase`.
+- Build: `dotnet build IndustrialIot.sln` → 0 warnings, 0 errors.
+- Package: Microsoft.Extensions.TimeProvider.Testing 10.10.0.
+- Repair history: R1 missing `using` (test); R2 `MakeReadOnly` needs resolver + FakeTimeProvider forward-only ordering; R3 review FAIL (lenient enum converter, Serialize leaked JsonException, sub-ms timestamps, 1e400, TZ-dependent test) → fixed; extra round authorized by user at re-review FAIL (lone-surrogate ArgumentException, `.Z`, issuedBy text rules, default(JsonElement)) → fixed. One added test row (lone surrogate inside an unknown field) was corrected to an accepted case to match the contract "unknown fields ignored".
+- Final review: code-auditor PASS (0 Critical/High/Medium); remaining Low (doc wording on caller-argument exceptions) fixed before the final run.
+- Known limitation: NaN→`value=null`/`quality=bad` is a producer rule exercised in wave 2; this task rejects non-finite numbers on both Serialize and Deserialize.

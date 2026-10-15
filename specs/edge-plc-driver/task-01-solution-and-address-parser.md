@@ -1,6 +1,6 @@
 # Task 01 — Solution skeleton builds and S7 address strings parse deterministically
 
-Status: blocked
+Status: done
 
 ## Outcome
 `dotnet test` builds the `IndustrialIot` solution (Shared, Edge, two test projects) and proves `PlcAddressParser` accepts the documented grammar, emits a canonical form, and rejects everything else.
@@ -62,4 +62,25 @@ Input is trimmed and case-insensitive. Numbers are ASCII decimal digits `[0-9]` 
 On a failed Step or Verification Plan run: stop; do not widen scope, change the Command, or weaken a test; record observed versus expected; repair only the cited cause; after three failed rounds, stop and ask the user.
 
 ## Receipt
-<!-- Fill only after execution; see canonical form in templates. -->
+
+Verification: PASS
+Command: dotnet test tests/Edge.Tests --filter FullyQualifiedName~PlcAddressParserTests
+Exit: 0
+Base: 08d6fec1a3d7d473925869e43fdb422d89b990ae
+Head: c8b57cd5e48f3afcf6fa39533b0688cc06f27f8762b06931342b8c2feaa9b1ec
+```text
+$ dotnet test tests/Edge.Tests --filter FullyQualifiedName~PlcAddressParserTests
+  Determining projects to restore...
+  All projects are up-to-date for restore.
+  IndustrialIot.Edge -> C:\Users\HOME\source\repos\PLCProtocol\src\Edge\bin\Debug\net10.0\IndustrialIot.Edge.dll
+  Edge.Tests -> C:\Users\HOME\source\repos\PLCProtocol\tests\Edge.Tests\bin\Debug\net10.0\Edge.Tests.dll
+Test run for C:\Users\HOME\source\repos\PLCProtocol\tests\Edge.Tests\bin\Debug\net10.0\Edge.Tests.dll (.NETCoreApp,Version=v10.0)
+A total of 1 test files matched the specified pattern.
+
+Passed!  - Failed:     0, Passed:    46, Skipped:     0, Total:    46, Duration: 66 ms - Edge.Tests.dll (net10.0)
+```
+- Pre-change run: exit 1, `MSB1009: Project file does not exist. Switch: tests/Edge.Tests` (expected: test project is a task-owned Create).
+- Build: `dotnet build IndustrialIot.sln` → 0 warnings, 0 errors (`TreatWarningsAsErrors` on); SDK 10.0.401.
+- Review: code-auditor PASS (0 Critical/High/Medium); 3 Low fixed before final run (RootNamespace in `Directory.Build.props`, length cap after trim + raw cap 1024, `[NotNullWhen(true)]` on `TryParse`), plus probe `Parse_ValidAddressWithLongPadding_IsTrimmedFirst`.
+- Counterexample coverage: `M0.8` and `DB0.DBW0` are rows of `Parse_InvalidForms_Throws`.
+- Packages (template defaults): xunit 2.9.3, xunit.runner.visualstudio 3.1.4, Microsoft.NET.Test.Sdk 17.14.1, Microsoft.Extensions.Hosting 10.0.12.

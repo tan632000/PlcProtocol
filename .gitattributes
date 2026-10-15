@@ -1,0 +1,3 @@
+# Normalize line endings: LF in the repository (Linux containers/CI), CRLF only for Windows scripts.
+* text=auto eol=lf
+*.ps1 text eol=crlf

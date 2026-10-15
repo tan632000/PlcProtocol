@@ -1,0 +1,5 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Contracts and helpers shared by Edge and Cloud. Must stay free of PLC/transport dependencies. -->
+
+</Project>

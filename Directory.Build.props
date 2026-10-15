@@ -1,0 +1,14 @@
+<Project>
+  <!-- Shared build settings for every project under this folder (MSBuild imports this file automatically). -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <!-- Warnings are bugs-in-waiting: fail the build instead of ignoring them. -->
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <!-- Every namespace starts with IndustrialIot: "Edge.Tests" becomes "IndustrialIot.Edge.Tests";
+         projects already named IndustrialIot.* keep their name. -->
+    <RootNamespace Condition="!$(MSBuildProjectName.StartsWith('IndustrialIot.'))">IndustrialIot.$(MSBuildProjectName)</RootNamespace>
+  </PropertyGroup>
+</Project>

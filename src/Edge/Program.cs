@@ -1,6 +1,9 @@
-// Edge agent entry point (.NET Generic Host).
-// Wave 1 only builds the host; drivers and hosted services are registered in later tasks/waves.
+// Edge agent entry point (.NET Generic Host). Configuration comes from appsettings.json and
+// environment variables (Edge__...); AddEdgeAgent validates it before anything starts.
+using IndustrialIot.Edge;
+
 var builder = Host.CreateApplicationBuilder(args);
+builder.Services.AddEdgeAgent(builder.Configuration);
 
 var host = builder.Build();
 host.Run();

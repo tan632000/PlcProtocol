@@ -1,0 +1,151 @@
+using System.Text.Json;
+using IndustrialIot.Edge.Buffering;
+using IndustrialIot.Edge.Drivers;
+using IndustrialIot.Shared.Common;
+using Microsoft.Extensions.Options;
+
+namespace IndustrialIot.Edge.Polling;
+
+/// <summary>
+/// Reads every catalog tag once per interval and stores the cycle as one batch.
+/// Cycle k is due at <c>start + k × interval</c>; a cycle that overruns skips the due times it missed
+/// instead of catching up in a burst. After the PLC turns out to be unreachable the poller also skips
+/// the next cycle, so the single driver connection is free for remote writes in between.
+/// </summary>
+internal sealed class TagPoller(
+    IPlcDriver driver,
+    PlcTagCatalog catalog,
+    TelemetryStore store,
+    IOptions<PollOptions> options,
+    TimeProvider clock,
+    ILogger<TagPoller> logger) : BackgroundService
+{
+    private readonly TimeSpan _interval = TimeSpan.FromMilliseconds(options.Value.IntervalMs);
+    private long _waitsArmed;
+
+    /// <summary>How many times the loop has started waiting for its next due time (test hook).</summary>
+    internal long WaitsArmed => Interlocked.Read(ref _waitsArmed);
+
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        try
+        {
+            if (catalog.Tags.Count == 0)
+            {
+                logger.LogInformation("Tag catalog is empty; nothing to poll.");
+                return;
+            }
+
+            var start = clock.GetUtcNow();
+            while (!stoppingToken.IsCancellationRequested)
+            {
+                var plcUnavailable = await RunCycleAsync(stoppingToken).ConfigureAwait(false);
+
+                var now = clock.GetUtcNow();
+                var nextDue = (long)Math.Floor((now - start) / _interval) + 1; // first due time strictly after now
+                if (plcUnavailable)
+                {
+                    nextDue++; // leave the driver lock free for one whole interval
+                }
+
+                var delay = start + (nextDue * _interval) - now;
+
+                // Create the timer first, then report "waiting": a test may move the clock as soon as it sees it.
+                var wait = Task.Delay(delay, clock, stoppingToken);
+                Interlocked.Increment(ref _waitsArmed);
+                await wait.ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            // Host is stopping.
+        }
+    }
+
+    /// <summary>Reads all tags and stores them. Returns true when the PLC was unreachable.</summary>
+    private async Task<bool> RunCycleAsync(CancellationToken ct)
+    {
+        var samples = new List<TelemetrySample>(catalog.Tags.Count);
+        var plcUnavailable = false;
+        var unexpectedLogged = false;
+
+        foreach (var tag in catalog.Tags)
+        {
+            if (plcUnavailable)
+            {
+                samples.Add(Bad(tag));
+                continue;
+            }
+
+            try
+            {
+                var value = await driver.ReadAsync(tag.Address, tag.DataType, ct).ConfigureAwait(false);
+                samples.Add(ToSample(tag, value));
+            }
+            catch (PlcUnavailableException ex)
+            {
+                // Includes PlcBusyException. The other tags would only wait for the same timeout.
+                logger.LogWarning("PLC unavailable while reading {TagId}: {Message}", tag.TagId, ex.Message);
+                plcUnavailable = true;
+                samples.Add(Bad(tag));
+            }
+            catch (Exception ex) when (ex is PlcAccessDeniedException or PlcValueException)
+            {
+                logger.LogWarning("Reading {TagId} failed: {Message}", tag.TagId, ex.Message);
+                samples.Add(Bad(tag));
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                if (!unexpectedLogged)
+                {
+                    logger.LogError(ex, "Unexpected error while reading {TagId}.", tag.TagId);
+                    unexpectedLogged = true;
+                }
+
+                samples.Add(Bad(tag));
+            }
+        }
+
+        try
+        {
+            await store.AppendBatchAsync(samples, ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            // A full or locked disk must not stop polling; the next cycle tries again.
+            logger.LogError(ex, "Storing a poll cycle of {Count} samples failed.", samples.Count);
+        }
+
+        return plcUnavailable;
+    }
+
+    private TelemetrySample ToSample(ResolvedTag tag, object value)
+    {
+        var now = clock.GetUtcNow();
+
+        // bool → true/false; integer types → JSON integers; float → shortest round-trip number.
+        // Anything else (NaN/±Inf, an unexpected CLR type) is a bad sample, so one odd value cannot
+        // invalidate the whole batch.
+        JsonElement? json = value switch
+        {
+            bool b => JsonSerializer.SerializeToElement(b),
+            byte or ushort or short or uint or int => JsonSerializer.SerializeToElement(value, value.GetType()),
+            float real when float.IsFinite(real) => JsonSerializer.SerializeToElement(real),
+            _ => null,
+        };
+
+        return json is null
+            ? new TelemetrySample(tag.TagId, null, TelemetryQuality.Bad, now)
+            : new TelemetrySample(tag.TagId, json, TelemetryQuality.Good, now);
+    }
+
+    private TelemetrySample Bad(ResolvedTag tag) => new(tag.TagId, null, TelemetryQuality.Bad, clock.GetUtcNow());
+}

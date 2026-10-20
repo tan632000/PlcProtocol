@@ -25,3 +25,6 @@ deployments/.secrets/
 
 # Edge buffer when run from Visual Studio / dotnet run (Buffer:Path is relative to src/Edge)
 src/Edge/data/
+
+# Visual Studio per-user state (locked while VS is open)
+.vs/

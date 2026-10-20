@@ -45,6 +45,7 @@ public sealed partial class PlcTagCatalog
     {
         ArgumentNullException.ThrowIfNull(options);
 
+        var ordered = new List<ResolvedTag>();
         foreach (var definition in options.Tags ?? [])
         {
             var tag = Resolve(definition);
@@ -52,10 +53,16 @@ public sealed partial class PlcTagCatalog
             {
                 throw new InvalidOperationException($"Tag catalog: duplicate tagId '{tag.TagId}' (ids are case-insensitive).");
             }
+
+            ordered.Add(tag);
         }
 
+        Tags = ordered.ToArray();
         EnsureWritableTagsDoNotOverlap();
     }
+
+    /// <summary>All tags in configuration order (the order the poller reads them).</summary>
+    public IReadOnlyList<ResolvedTag> Tags { get; }
 
     public bool TryGet(string tagId, [NotNullWhen(true)] out ResolvedTag? tag)
     {

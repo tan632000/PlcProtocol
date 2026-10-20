@@ -1,0 +1,75 @@
+{
+  "realm": "iiot",
+  "enabled": true,
+  "sslRequired": "all",
+  "roles": {
+    "realm": [
+      { "name": "Viewer", "description": "Reads edges, telemetry and commands" },
+      { "name": "Operator", "description": "Reads and issues commands" }
+    ]
+  },
+  "clients": [
+    {
+      "clientId": "iiot-cli",
+      "name": "IIoT trial command line (password grant, dev only)",
+      "enabled": true,
+      "publicClient": true,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": true,
+      "serviceAccountsEnabled": false,
+      "fullScopeAllowed": true,
+      "defaultClientScopes": ["basic"],
+      "optionalClientScopes": [],
+      "protocolMappers": [
+        {
+          "name": "realm roles as roles",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-realm-role-mapper",
+          "config": {
+            "claim.name": "roles",
+            "multivalued": "true",
+            "jsonType.label": "String",
+            "access.token.claim": "true",
+            "id.token.claim": "false",
+            "userinfo.token.claim": "false",
+            "introspection.token.claim": "true"
+          }
+        },
+        {
+          "name": "cloud api audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.custom.audience": "iiot-cloud-api",
+            "access.token.claim": "true",
+            "id.token.claim": "false",
+            "introspection.token.claim": "true"
+          }
+        }
+      ]
+    }
+  ],
+  "users": [
+    {
+      "username": "viewer",
+      "enabled": true,
+      "email": "viewer@iiot.local",
+      "emailVerified": true,
+      "firstName": "Trial",
+      "lastName": "Viewer",
+      "realmRoles": ["Viewer"],
+      "credentials": [{ "type": "password", "value": "${VIEWER_PASSWORD}", "temporary": false }]
+    },
+    {
+      "username": "operator",
+      "enabled": true,
+      "email": "operator@iiot.local",
+      "emailVerified": true,
+      "firstName": "Trial",
+      "lastName": "Operator",
+      "realmRoles": ["Operator"],
+      "credentials": [{ "type": "password", "value": "${OPERATOR_PASSWORD}", "temporary": false }]
+    }
+  ]
+}

@@ -21,3 +21,4 @@ TestResults/
 
 # Secrets: TLS certificates/keys must never be committed
 deployments/**/certs/
+deployments/.secrets/

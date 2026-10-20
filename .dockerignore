@@ -1,0 +1,23 @@
+# Build context for deployments/cloud/Dockerfile is the repository root.
+# Secrets, keys and env files must never reach an image (plan D-05).
+deployments/.secrets/
+**/*.key
+**/*.env
+**/*.pfx
+**/*.p12
+**/*key*.pem
+**/id_rsa*
+**/id_ecdsa*
+**/id_ed25519*
+
+# Not needed to build the Cloud.
+.git/
+.claude/
+.vs/
+.vscode/
+specs/
+tests/
+docs/
+**/bin/
+**/obj/
+**/TestResults/

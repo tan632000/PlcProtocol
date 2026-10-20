@@ -18,6 +18,12 @@ public static class CommandReasons
     public const string PlcAccessDenied = "plc_access_denied";
     public const string WriteOutcomeUnknown = "write_outcome_unknown";
 
+    /// <summary>
+    /// The Edge could not record the command durably, so it did not write to the PLC. Not remembered:
+    /// retry with a new <c>commandId</c>.
+    /// </summary>
+    public const string EdgeStorageError = "edge_storage_error";
+
     /// <summary>Every code defined above.</summary>
     public static IReadOnlyList<string> All { get; } =
     [
@@ -32,5 +38,6 @@ public static class CommandReasons
         PlcBusy,
         PlcAccessDenied,
         WriteOutcomeUnknown,
+        EdgeStorageError,
     ];
 }

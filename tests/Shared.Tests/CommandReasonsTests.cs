@@ -22,6 +22,7 @@ public class CommandReasonsTests
             "plc_busy",
             "plc_access_denied",
             "write_outcome_unknown",
+            "edge_storage_error",
         ];
 
         Assert.Equal(expected.Order(StringComparer.Ordinal), CommandReasons.All.Order(StringComparer.Ordinal));

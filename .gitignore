@@ -22,3 +22,6 @@ TestResults/
 # Secrets: TLS certificates/keys must never be committed
 deployments/**/certs/
 deployments/.secrets/
+
+# Edge buffer when run from Visual Studio / dotnet run (Buffer:Path is relative to src/Edge)
+src/Edge/data/

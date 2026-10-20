@@ -19,6 +19,12 @@ namespace IndustrialIot.Cloud.Ingestion;
 /// Stores telemetry from <c>iiot/{edgeId}/telemetry</c>: once per (edge, stream, sequence), newest value per
 /// tag, acknowledged only after the transaction committed. Invalid or spoofed messages are dropped and
 /// acknowledged, so they are not redelivered forever.
+/// <para>
+/// After a sample is stored (or found already stored), or fails a contract rule that can never pass later,
+/// the owning Edge gets a <see cref="TelemetryAck"/> on <c>iiot/{edgeId}/telemetry-acks</c>: the only signal
+/// that lets it delete the sample. Drops that may become valid later (unsupported schema version, a timestamp
+/// ahead of this clock) and drops that do not provably belong to the topic's Edge are never acked.
+/// </para>
 /// </summary>
 internal sealed class TelemetryIngestor(
     CloudMqttConnection connection,
@@ -31,6 +37,7 @@ internal sealed class TelemetryIngestor(
     public const string TopicFilter = "iiot/+/telemetry";
     private const int MaxPayloadBytes = 16 * 1024;
     private static readonly TimeSpan MaxClockSkew = TimeSpan.FromMinutes(2);
+    private static readonly JsonDocumentOptions RejectionParseOptions = new() { AllowDuplicateProperties = false };
 
     // Registering here (before ApplicationStarted) means the first MQTT connection already subscribes.
     public Task StartAsync(CancellationToken cancellationToken)
@@ -44,8 +51,14 @@ internal sealed class TelemetryIngestor(
     internal async Task HandleAsync(MqttApplicationMessage message, CancellationToken ct)
     {
         var receivedUtc = clock.GetUtcNow();
-        if (Validate(message, receivedUtc) is not { } sample)
+        var (sample, rejectionAck) = Validate(message, receivedUtc);
+        if (sample is null)
         {
+            if (rejectionAck is not null)
+            {
+                await PublishAckAsync(rejectionAck, ct).ConfigureAwait(false);
+            }
+
             return; // dropped: acknowledged
         }
 
@@ -64,10 +77,39 @@ internal sealed class TelemetryIngestor(
             await connection.ForceReconnectAsync().ConfigureAwait(false);
             throw new MessageNotAcknowledgedException("the database stayed unavailable; reconnecting for redelivery.");
         }
+
+        // Committed (inserted now or by an earlier delivery): the Edge may delete it.
+        await PublishAckAsync(AckFor(sample.EdgeId, sample.StreamId, sample.Sequence), ct).ConfigureAwait(false);
     }
 
-    /// <summary>The sample to store, or null (after a warning naming topic and reason only) when it must be dropped.</summary>
-    private TelemetryPayload? Validate(MqttApplicationMessage message, DateTimeOffset receivedUtc)
+    /// <summary>
+    /// Best effort: an ack that is not confirmed only delays the delete, because the Edge resends unacked samples
+    /// and the primary key absorbs the duplicate.
+    /// </summary>
+    private async Task PublishAckAsync(TelemetryAck ack, CancellationToken ct)
+    {
+        var outcome = await connection.PublishAsync($"iiot/{ack.EdgeId}/telemetry-acks", ContractJson.Serialize(ack), ct).ConfigureAwait(false);
+        if (outcome != PublishOutcome.Confirmed)
+        {
+            logger.LogWarning("Telemetry ack for edge {EdgeId}, stream {StreamId}, sequence {Sequence} was not confirmed ({Outcome}); the Edge will resend the sample.",
+                ack.EdgeId, ack.StreamId, ack.FromSequence, outcome);
+        }
+    }
+
+    private static TelemetryAck AckFor(string edgeId, Guid streamId, long sequence) => new()
+    {
+        SchemaVersion = ContractJson.SchemaVersion,
+        EdgeId = edgeId,
+        StreamId = streamId,
+        FromSequence = sequence,
+        ToSequence = sequence,
+    };
+
+    /// <summary>
+    /// The sample to store; or, after a warning naming topic and reason only, no sample and either the ack for a
+    /// permanently invalid sample or null when the drop must not be acked.
+    /// </summary>
+    private (TelemetryPayload? Sample, TelemetryAck? RejectionAck) Validate(MqttApplicationMessage message, DateTimeOffset receivedUtc)
     {
         var topicEdgeId = MqttTopicFilter.EdgeIdOf(message.Topic, "telemetry");
         if (topicEdgeId is null || !edges.Value.IsAllowed(topicEdgeId))
@@ -81,15 +123,17 @@ internal sealed class TelemetryIngestor(
             return Drop(message.Topic, "payload larger than 16 KiB");
         }
 
+        var json = Encoding.UTF8.GetString(payload.ToArray());
         TelemetryPayload sample;
         try
         {
-            sample = ContractJson.Deserialize<TelemetryPayload>(Encoding.UTF8.GetString(payload.ToArray()));
+            sample = ContractJson.Deserialize<TelemetryPayload>(json);
         }
         catch (ContractValidationException)
         {
             // No detail: the exception text (even a JSON path) can echo payload content.
-            return Drop(message.Topic, "invalid payload");
+            Drop(message.Topic, "invalid payload");
+            return (null, RejectionAck(json, topicEdgeId));
         }
 
         // The topic is what the broker ACL binds to the Edge's credentials; the payload is just text.
@@ -103,12 +147,48 @@ internal sealed class TelemetryIngestor(
             return Drop(message.Topic, "timestamp more than 2 minutes in the future");
         }
 
-        return sample;
+        return (sample, null);
     }
 
-    private TelemetryPayload? Drop(string topic, string reason)
+    private (TelemetryPayload?, TelemetryAck?) Drop(string topic, string reason)
     {
         logger.LogWarning("Dropping telemetry on '{Topic}': {Reason}.", topic, reason);
+        return (null, null);
+    }
+
+    /// <summary>
+    /// The ack for a payload that broke a contract rule yet still names this topic's Edge, a stream and a sequence
+    /// under the current schema version: no later delivery of those bytes can pass, so the Edge may drop them.
+    /// Anything less certain (other version, other Edge, no stream or sequence) is not acked and stays on the Edge.
+    /// </summary>
+    private static TelemetryAck? RejectionAck(string json, string topicEdgeId)
+    {
+        try
+        {
+            // The same decoded text and the same duplicate rule as ContractJson: two parsers must never disagree
+            // on which sequence a payload names, or the ack could delete a different, undelivered sample.
+            using var document = JsonDocument.Parse(json, RejectionParseOptions);
+            var root = document.RootElement;
+            if (root.ValueKind == JsonValueKind.Object
+                && root.TryGetProperty("schemaVersion", out var version) && version.ValueKind == JsonValueKind.Number
+                && version.TryGetInt32(out var schemaVersion) && schemaVersion == ContractJson.SchemaVersion
+                && root.TryGetProperty("edgeId", out var edgeId) && edgeId.ValueKind == JsonValueKind.String
+                && string.Equals(edgeId.GetString(), topicEdgeId, StringComparison.Ordinal)
+                && root.TryGetProperty("streamId", out var stream) && stream.ValueKind == JsonValueKind.String
+                && Guid.TryParse(stream.GetString(), out var streamId) && streamId != Guid.Empty
+                && root.TryGetProperty("sequence", out var sequence) && sequence.ValueKind == JsonValueKind.Number
+                && sequence.TryGetInt64(out var sequenceNumber) && sequenceNumber >= 0)
+            {
+                return AckFor(topicEdgeId, streamId, sequenceNumber);
+            }
+        }
+        catch (Exception ex) when (ex is JsonException or InvalidOperationException or ArgumentException)
+        {
+            // Not even JSON, a duplicated property, or a string that cannot be decoded (e.g. a lone surrogate escape
+            // such as "\uD800"): nothing identifies the sample. Never let it escape: an exception here would leave the
+            // message unacknowledged and redelivered forever, blocking every Edge behind it.
+        }
+
         return null;
     }
 

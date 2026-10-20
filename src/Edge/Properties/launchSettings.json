@@ -4,7 +4,7 @@
       "commandName": "Project",
       "environmentVariables": {
         "DOTNET_ENVIRONMENT": "Development",
-        "Edge__Mqtt__Host": "localhost",
+        "Edge__Mqtt__Host": "127.0.0.1",
         "Edge__Mqtt__Port": "8883"
       }
     },

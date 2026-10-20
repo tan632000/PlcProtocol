@@ -278,10 +278,16 @@ dotnet run --project src\Edge --launch-profile IndustrialIot.Edge   # không dù
 1. Mở `IndustrialIot.sln`.
 2. Solution Explorer → chuột phải `IndustrialIot.Edge` → **Set as Startup Project**.
 3. Trên thanh công cụ, cạnh nút ▶, chọn profile:
-   - **PLC test (no broker)** (mặc định): chỉ đọc PLC, chưa cần broker MQTT (MQTT báo "chưa kết nối" là bình thường);
-     dữ liệu nằm tạm ở `src/Edge/data/`.
-   - **IndustrialIot.Edge**: chạy thật với broker — đặt `Edge__Mqtt__*` như đoạn PowerShell ở trên, hoặc thêm vào
+   - **PLC + local broker** (mặc định): đọc PLC và gửi lên stack Docker trên chính máy này (`127.0.0.1:8883`). Mật
+     khẩu MQTT và đường dẫn `ca.pem` lấy từ .NET User Secrets (`%APPDATA%\Microsoft\UserSecrets\iiot-edge-dev\`,
+     ngoài repo), khoá `Edge:Mqtt:Password` và `Edge:Mqtt:CaCertificatePath`. Dùng `127.0.0.1`, **không** dùng
+     `localhost`: trên Docker Desktop `localhost` thành `::1` và đi qua proxy IPv6, chậm khoảng 44 ms mỗi tin
+     (~23 tin/s, đo 2026-10-20) so với 0,5 ms qua `127.0.0.1`.
+   - **PLC test (no broker)**: chỉ đọc PLC, chưa cần broker MQTT (MQTT báo "chưa kết nối" là bình thường).
+   - **IndustrialIot.Edge**: chạy thật với broker khác — đặt `Edge__Mqtt__*` như đoạn PowerShell ở trên, hoặc thêm vào
      profile qua **Debug → IndustrialIot.Edge Debug Properties** (không commit mật khẩu thật).
+
+   Dữ liệu buffer nằm ở `src/Edge/data/` (đã có trong `.gitignore`).
 4. Bấm ▶ (**F5** có debug, **Ctrl+F5** không debug), rồi mở **http://localhost:5080/** (PLC Monitor).
 5. Sửa `src/Edge/appsettings.json` (IP PLC, danh sách tag) → **dừng** (Shift+F5) rồi chạy lại: Edge chỉ đọc cấu hình
    lúc khởi động.

@@ -79,3 +79,5 @@ Specs-Contract: process-first-ready-v1
 | R-11 | accept | premature batcher; task-01 off-goal | D-05; Out of scope | task-02 Step 2 | per-message ack | PASS |
 | R-12 | accept | D-06 claims window stall with old ACL | D-06 | `src/Edge/Messaging/MqttConnection.cs:218-225` | refused subscription documented | PASS |
 | R-13 | accept | filter may run 0 tests; docs drift | task-01 command; task-04 Ownership | task-01 Oracle grep ≥ 1 | full suite + docs owned | PASS |
+
+- GATE-DONE (2026-10-20): the user accepted the feature as done after reviewing the final-Head receipts (full solution 480/480, end-to-end drain 329 samples/s) and the listed limitations.

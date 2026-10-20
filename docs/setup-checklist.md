@@ -105,7 +105,8 @@ PowerShell **Run as administrator**:
 
 - [ ] Trên máy Edge mở **http://localhost:5080/** (PLC Monitor):
   - PLC **Đọc tốt**, mọi tag chất lượng **Tốt**;
-  - MQTT **Đã kết nối**; **Buffer chờ gửi** về gần 0.
+  - MQTT **Đã kết nối**; **Buffer chờ gửi** về gần 0 (đây là số mẫu Cloud chưa xác nhận, nên chỉ về 0 khi cả
+    broker lẫn Cloud đều chạy).
 - [ ] So từng tag với **Watch table** trong TIA (đổi vài giá trị bằng Modify, xem PLC Monitor đổi theo trong ~1 giây).
 - [ ] Trên máy Server:
       ```bash
@@ -114,6 +115,8 @@ PowerShell **Run as administrator**:
       ```
       ra đúng giá trị như PLC Monitor.
 - [ ] Rút dây mạng Edge ↔ Server 1–2 phút rồi cắm lại: Buffer tăng rồi tự giảm về 0, API không mất dữ liệu.
+- [ ] Dừng Cloud 1–2 phút (`docker compose -f deployments/compose.yaml stop cloud`, rồi `start cloud`) trong khi Edge
+      vẫn nối broker: Buffer tăng dù MQTT vẫn "Đã kết nối", rồi tự giảm về 0 sau khi Cloud chạy lại; API đủ dữ liệu.
 
 ## Giai đoạn 7 — Bật ghi (chỉ khi khách yêu cầu)
 

@@ -117,6 +117,34 @@ kiểm tra `SMOKE-00`…`SMOKE-07` rồi xoá sạch. Nó **từ chối chạy**
 | Edge báo lỗi chứng chỉ | IP/tên Edge dùng không có trong `--san` | Tạo lại secret với `--san` đúng (phải cài lại Edge) |
 | Edge kết nối được nhưng Cloud không nhận dữ liệu | EdgeId chưa có trong allow-list hoặc Username ≠ EdgeId | `--add-edge` + `--force-recreate`; kiểm tra cấu hình Edge |
 | Mosquitto log "not authorised" | Sai mật khẩu, sai username, hoặc publish ra topic của Edge khác | Kiểm tra `Edge__Mqtt__Password` và EdgeId |
+| Edge log `Broker refused subscription(s): iiot/<id>/telemetry-acks`, không kết nối được | Broker còn ACL cũ (chưa có topic `telemetry-acks`) | Cập nhật `deployments/mosquitto/acl` rồi `--force-recreate mosquitto` — xem [Thứ tự nâng cấp](#thứ-tự-nâng-cấp) |
+| "Buffer chờ gửi" trên PLC Monitor tăng mãi dù MQTT đã kết nối | Cloud tắt, Cloud bản cũ (không gửi xác nhận), hoặc Cloud log `timestamp more than 2 minutes in the future` | Bật/nâng cấp Cloud; sửa NTP trên máy Edge. Dữ liệu vẫn nằm trên Edge, không mất |
+| Mosquitto log `Outgoing messages are being dropped` | Cloud offline lâu, hàng đợi của broker cho Cloud đầy | Không mất dữ liệu: Edge giữ mẫu tới khi Cloud xác nhận và tự gửi lại. Nếu xảy ra thường xuyên, xem quy tắc tính `max_queued_messages` bên dưới |
+
+### Xác nhận dữ liệu (TelemetryAck) và giới hạn hàng đợi
+
+Edge chỉ xoá một mẫu khỏi buffer khi **Cloud đã lưu nó vào PostgreSQL** và gửi xác nhận
+(`TelemetryAck`, topic `iiot/<EdgeId>/telemetry-acks`). Broker nhận tin (PUBACK) chưa đủ: khi Cloud offline,
+broker chỉ giữ một số tin có hạn cho Cloud. Mẫu nào chưa được xác nhận thì Edge tự gửi lại; Cloud tự bỏ bản trùng.
+
+| Cấu hình (`appsettings.json`, mục `Edge:Mqtt`) | Mặc định | Ý nghĩa |
+|---|---|---|
+| `MaxUnacknowledged` | 500 | Số mẫu tối đa đã gửi nhưng chưa được xác nhận (1..5000) |
+| `AckTimeoutSeconds` | 30 | Chờ xác nhận bấy lâu mà mẫu cũ nhất chưa được xác nhận thì gửi lại từ mẫu cũ nhất; thời gian chờ nhân đôi mỗi lần (tối đa 600 s), về lại giá trị đầu khi mẫu cũ nhất được xác nhận (5..600) |
+
+Broker (`deployments/mosquitto/mosquitto.conf`): `max_queued_messages 20000`, `max_queued_bytes 134217728` (128 MiB)
+cho mỗi client offline. Quy tắc: `max_queued_messages` ≥ 2 × (số Edge × `MaxUnacknowledged`) — mặc định đủ cho
+khoảng 20 Edge. Vượt giới hạn thì broker bỏ bớt tin cho Cloud; dữ liệu chỉ chậm lại chứ không mất.
+
+#### Thứ tự nâng cấp
+
+1. Broker: cập nhật `acl` + `mosquitto.conf`, `docker compose -f deployments/compose.yaml up -d --force-recreate mosquitto`.
+2. Cloud: `docker compose -f deployments/compose.yaml up -d --build cloud`.
+3. Từng Edge (gói cài mới).
+
+Edge mới chạy với broker còn ACL cũ sẽ **không kết nối được** (broker từ chối subscription `telemetry-acks`) —
+không mất dữ liệu, mọi mẫu nằm lại trong buffer tới khi broker được cập nhật. Edge cũ chạy với Cloud mới vẫn bình
+thường (xác nhận gửi tới topic không ai đọc).
 
 ## Giới hạn bảo mật
 
@@ -192,7 +220,8 @@ phải trả về giá trị tag mới nhất.
 Mở trình duyệt bất kỳ (Chrome, Microsoft Edge…) **trên chính máy chạy phần mềm Edge**: **http://localhost:5080/** (trang **PLC Monitor**). Trang tự cập nhật mỗi giây và hiển thị:
 
 - trạng thái PLC (Đọc tốt / Có tag lỗi / Mất kết nối / Dữ liệu cũ), IP, Rack/Slot;
-- thời điểm chu kỳ đọc gần nhất, trạng thái MQTT, số mẫu đang chờ gửi trong buffer;
+- thời điểm chu kỳ đọc gần nhất, trạng thái MQTT, số mẫu trong buffer chưa được Cloud xác nhận (tăng khi Cloud
+  tắt hoặc mất mạng, tự giảm khi Cloud nhận lại);
 - bảng tag: địa chỉ, kiểu, giá trị, chất lượng, thời điểm đọc, quyền ghi và lý do lỗi (nếu có).
 
 Trang **chỉ xem**: không ghi xuống PLC, không mở thêm kết nối tới PLC (dùng kết quả của chính vòng đọc), và

@@ -176,6 +176,29 @@ public class BrokerTests(BrokerFixture broker) : IClassFixture<BrokerFixture>
     }
 
     [Fact]
+    public async Task TelemetryAcks_OnlyCloudWrites_OnlyOwnerReads()
+    {
+        await using var line1 = await MqttClientHelper.ConnectAsync(broker, Line1, broker.Password(Line1));
+        await line1.SubscribeAsync($"iiot/{Line1}/telemetry-acks");
+        await using var line2 = await MqttClientHelper.ConnectAsync(broker, Line2, broker.Password(Line2));
+        await line2.SubscribeAsync($"iiot/{Line1}/telemetry-acks", "iiot/+/telemetry-acks");
+        await using var cloud = await MqttClientHelper.ConnectAsync(broker, Cloud, broker.Password(Cloud));
+
+        await cloud.PublishAsync($"iiot/{Line1}/telemetry-acks", "ack-for-line1");
+        await line1.WaitForAsync("ack-for-line1");
+
+        // An ack deletes buffered data, so an Edge must not be able to forge one, not even for itself.
+        await line1.PublishAsync($"iiot/{Line1}/telemetry-acks", "forged-own-ack");
+        await line2.PublishAsync($"iiot/{Line1}/telemetry-acks", "forged-foreign-ack");
+        await cloud.PublishAsync($"iiot/{Line1}/telemetry-acks", "marker");
+        await line1.WaitForAsync("marker");
+        await Task.Delay(300);
+
+        Assert.Equal(["ack-for-line1", "marker"], line1.Payloads);
+        Assert.Empty(line2.Payloads); // another Edge's acks are unreadable, directly or through +
+    }
+
+    [Fact]
     public async Task PersistentSession_RedeliversUnacked()
     {
         await MqttClientHelper.ResetSessionAsync(broker, Line1);

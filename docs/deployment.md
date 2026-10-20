@@ -187,6 +187,24 @@ Restart-Service IndustrialIot.Edge                     # sau khi sửa appsettin
 Trên máy stack: `curl -H "Authorization: Bearer $(bash deployments/scripts/get-token.sh viewer)" http://127.0.0.1:8080/api/v1/edges/line1-edge01/tags/latest`
 phải trả về giá trị tag mới nhất.
 
+#### Màn hình PLC Monitor trên máy Edge
+
+Mở trình duyệt bất kỳ (Chrome, Microsoft Edge…) **trên chính máy chạy phần mềm Edge**: **http://localhost:5080/** (trang **PLC Monitor**). Trang tự cập nhật mỗi giây và hiển thị:
+
+- trạng thái PLC (Đọc tốt / Có tag lỗi / Mất kết nối / Dữ liệu cũ), IP, Rack/Slot;
+- thời điểm chu kỳ đọc gần nhất, trạng thái MQTT, số mẫu đang chờ gửi trong buffer;
+- bảng tag: địa chỉ, kiểu, giá trị, chất lượng, thời điểm đọc, quyền ghi và lý do lỗi (nếu có).
+
+Trang **chỉ xem**: không ghi xuống PLC, không mở thêm kết nối tới PLC (dùng kết quả của chính vòng đọc), và
+chỉ nghe trên `localhost` — máy khác trong mạng không truy cập được. Cấu hình trong `appsettings.json`:
+
+```json
+"Monitor": { "Enabled": true, "Port": 5080 }
+```
+
+Cổng 5080 đã bị chương trình khác chiếm thì Edge vẫn chạy bình thường, chỉ ghi lỗi
+`Monitor page disabled: port ... is not available` vào log — đổi `Port` rồi `Restart-Service IndustrialIot.Edge`.
+
 ### 5. Gỡ cài đặt
 
 Script gỡ cũng nằm sẵn trong thư mục cài đặt. Nó tự đọc thư mục cần xoá từ service đã đăng ký (không nhận
@@ -223,8 +241,23 @@ $secure = Read-Host "MQTT password" -AsSecureString        # không hiện lên 
 $env:Edge__Mqtt__Password = [Net.NetworkCredential]::new('', $secure).Password   # chỉ tồn tại trong cửa sổ này
 $env:Edge__EdgeId = "line1-edge01"; $env:Edge__Mqtt__Username = "line1-edge01"
 $env:Edge__Mqtt__Host = "192.168.1.50"; $env:Edge__Mqtt__CaCertificatePath = "C:\Temp\ca.pem"
-dotnet run --project src\Edge
+dotnet run --project src\Edge --launch-profile IndustrialIot.Edge   # không dùng profile "PLC test" (nó ghi đè MQTT bằng broker giả)
 ```
+
+#### Chạy từ Visual Studio
+
+1. Mở `IndustrialIot.sln`.
+2. Solution Explorer → chuột phải `IndustrialIot.Edge` → **Set as Startup Project**.
+3. Trên thanh công cụ, cạnh nút ▶, chọn profile:
+   - **PLC test (no broker)** (mặc định): chỉ đọc PLC, chưa cần broker MQTT (MQTT báo "chưa kết nối" là bình thường);
+     dữ liệu nằm tạm ở `src/Edge/data/`.
+   - **IndustrialIot.Edge**: chạy thật với broker — đặt `Edge__Mqtt__*` như đoạn PowerShell ở trên, hoặc thêm vào
+     profile qua **Debug → IndustrialIot.Edge Debug Properties** (không commit mật khẩu thật).
+4. Bấm ▶ (**F5** có debug, **Ctrl+F5** không debug), rồi mở **http://localhost:5080/** (PLC Monitor).
+5. Sửa `src/Edge/appsettings.json` (IP PLC, danh sách tag) → **dừng** (Shift+F5) rồi chạy lại: Edge chỉ đọc cấu hình
+   lúc khởi động.
+
+Không chạy hai Edge cùng lúc (Visual Studio + service đã cài): cùng chiếm cổng 5080 và thêm một kết nối tới PLC.
 
 ### Kiểm tra bộ cài (cho người phát triển)
 

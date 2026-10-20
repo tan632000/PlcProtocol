@@ -1,0 +1,99 @@
+# Trial stack (wave 4, plan D-01..D-06): PostgreSQL, Mosquitto (TLS + ACL), Keycloak (HTTPS, dev mode), Cloud.
+#   bash deployments/scripts/dev-secrets.sh --san IP:<this machine's LAN IP>
+#   docker compose -f deployments/compose.yaml up -d --build --wait
+# Secrets come from IIOT_SECRETS (default ./.secrets next to this file); each container mounts only the files
+# it needs, read-only. ca.key is never mounted. Only the broker is reachable from the LAN.
+name: iiot
+
+services:
+  postgres:
+    # postgres:17-alpine
+    image: postgres@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
+    env_file: ${IIOT_SECRETS:-./.secrets}/postgres.env
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U iiot -d iiot"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    restart: ${IIOT_RESTART:-unless-stopped}
+
+  mosquitto:
+    # eclipse-mosquitto:2.0.20
+    image: eclipse-mosquitto@sha256:21421af7b32bf9ce508e9090c8eb13bb81f410ca778dc205506180a6f862d0eb
+    ports:
+      - "${IIOT_MQTT_PORT:-8883}:8883"
+    volumes:
+      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - ./mosquitto/acl:/mosquitto/config/acl:ro
+      - ${IIOT_SECRETS:-./.secrets}/mosquitto/ca.pem:/mosquitto/config/secrets/ca.pem:ro
+      - ${IIOT_SECRETS:-./.secrets}/mosquitto/server.pem:/mosquitto/config/secrets/server.pem:ro
+      - ${IIOT_SECRETS:-./.secrets}/mosquitto/server.key:/mosquitto/config/secrets/server.key:ro
+      - ${IIOT_SECRETS:-./.secrets}/mosquitto/passwd:/mosquitto/config/secrets/passwd:ro
+      - mosquitto-data:/mosquitto/data
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 8883"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    restart: ${IIOT_RESTART:-unless-stopped}
+
+  keycloak:
+    # quay.io/keycloak/keycloak:26.0.7
+    image: quay.io/keycloak/keycloak@sha256:4388e2379b7e870a447adbe7b80bd61f5fbf04e925832b19669fda4957f05a81
+    command: ["start-dev", "--import-realm"]
+    env_file: ${IIOT_SECRETS:-./.secrets}/keycloak.env
+    environment:
+      # One fixed issuer (https://keycloak:8443/realms/iiot) whatever URL a token was requested on.
+      KC_HOSTNAME: https://keycloak:8443
+      KC_HTTP_ENABLED: "false"
+      KC_HTTPS_PORT: "8443"
+      KC_HTTPS_CERTIFICATE_FILE: /opt/keycloak/conf/tls/server.pem
+      KC_HTTPS_CERTIFICATE_KEY_FILE: /opt/keycloak/conf/tls/server.key
+      KC_HEALTH_ENABLED: "true"
+    ports:
+      - "127.0.0.1:${IIOT_KEYCLOAK_PORT:-8443}:8443"
+    volumes:
+      - ./keycloak/iiot-realm.json:/opt/keycloak/data/import/iiot-realm.json:ro
+      - ${IIOT_SECRETS:-./.secrets}/keycloak/server.pem:/opt/keycloak/conf/tls/server.pem:ro
+      - ${IIOT_SECRETS:-./.secrets}/keycloak/server.key:/opt/keycloak/conf/tls/server.key:ro
+    healthcheck:
+      # The image has no curl; the management port only opens once the server (and the realm import) is up.
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/9000"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 20s
+    restart: ${IIOT_RESTART:-unless-stopped}
+
+  cloud:
+    build:
+      context: ..
+      dockerfile: deployments/cloud/Dockerfile
+    env_file: ${IIOT_SECRETS:-./.secrets}/cloud.env
+    environment:
+      Cloud__Auth__Authority: https://keycloak:8443/realms/iiot
+      Cloud__Auth__Audience: iiot-cloud-api
+      Cloud__Mqtt__Host: mosquitto
+      Cloud__Mqtt__Port: "8883"
+      Cloud__Mqtt__Username: iiot-cloud
+      Cloud__Mqtt__CaCertificatePath: /run/iiot/ca.pem
+      # Trust the dev CA for Keycloak's HTTPS metadata (replaces the public CA bundle inside this container).
+      SSL_CERT_FILE: /run/iiot/ca.pem
+    ports:
+      - "127.0.0.1:${IIOT_API_PORT:-8080}:8080"
+    volumes:
+      - ${IIOT_SECRETS:-./.secrets}/ca.pem:/run/iiot/ca.pem:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mosquitto:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+    restart: ${IIOT_RESTART:-unless-stopped}
+
+volumes:
+  pgdata:
+  mosquitto-data:

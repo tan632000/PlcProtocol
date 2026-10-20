@@ -1,0 +1,13 @@
+# Topic ACL (plan D-02). Anything not granted here is denied, including #, $SYS/# and $share/...
+
+# The Cloud: receives every Edge's telemetry and results, and is the only identity that sends commands.
+user iiot-cloud
+topic read iiot/+/telemetry
+topic read iiot/+/command-results
+topic write iiot/+/commands
+
+# Every identity, through its username (= edgeId for an Edge): only its own topics.
+# The secrets script never issues an Edge id equal to "iiot-cloud", so no Edge can own the Cloud's.
+pattern write iiot/%u/telemetry
+pattern write iiot/%u/command-results
+pattern read iiot/%u/commands

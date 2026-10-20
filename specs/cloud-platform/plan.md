@@ -1,0 +1,79 @@
+# Wave 3 — Cloud platform: ingestion, central DB, REST + JWT, SignalR
+Specs-Contract: process-first-ready-v1
+
+## Scope decision (GATE-SCOPE — 2026-10-18)
+- Existing:
+  - shared contracts: `TelemetryPayload` dedupe key (`src/Shared/Contracts/TelemetryPayload.cs:14-22`), `DeviceCommand` TTL and `IssuedBy` rules (`src/Shared/Contracts/DeviceCommand.cs:10-46`, `:92`), `CommandResult`, `CommandReasons` (12 codes);
+  - MQTT topics and TLS + username/password convention (`specs/edge-agent/plan.md` D-03, D-04); in-process TLS test broker with a failed-PUBACK hook (`tests/Edge.Tests/Fakes/TestMqttBroker.cs`);
+  - earlier API design to reuse: ProblemDetails mapping, health probes, `WebApplicationFactory` tests (`fec73b1:specs/plc-s7-base-core/task-04-minimal-api.md`);
+  - findings deferred to this wave (`specs/edge-plc-driver/plan.md:72`): fallback auth policy, `/health/ready` without per-request I/O, HTTPS/audit identity, `WebApplicationFactory` configuration timing;
+  - Edge requirements for the Cloud (`specs/edge-agent/plan.md` D-05, D-06a): dedupe telemetry on (`edgeId`,`streamId`,`sequence`); retry a command only with a **new** `commandId`; own timeout for unanswered commands; the Edge answers immediately after the write and never re-sends an acknowledged result.
+  - `src/` has only `Edge` and `Shared`; Docker engine running (Server 27.5.1, checked 2026-10-18); no `dotnet-ef` tool installed.
+- Minimum change: `src/Cloud` ASP.NET Core host with PostgreSQL, MQTT ingestion, JWT-protected REST (read + commands), SignalR push.
+- Expansion signals: ~40 files, > 2 new services; one packet because ingestion, REST and SignalR share one host and one database and cannot ship separately.
+- User decisions: **KEEP** (6 tasks); **PostgreSQL**, tests with **Testcontainers**; JWT issued by an **external IdP**, the API only validates; raw telemetry kept **90 days**.
+
+## Prerequisites (operator)
+- Docker engine running (Testcontainers starts `postgres:17-alpine`); verify with `docker version` showing a Server section. Satisfied 2026-10-18.
+
+## Out of scope
+- Web dashboard, user/edge management API, downsampling/TimescaleDB, rate limiting (not chosen at GATE-SCOPE).
+- Horizontal scaling (single Cloud instance), command history purge (commands are kept), Dockerfile/compose/Mosquitto/ACLs/CI (wave 4).
+
+## Decisions
+| ID | Chosen | Rejected | Why | Load-bearing assumption | Break signal → response |
+|---|---|---|---|---|---|
+| D-01 | ASP.NET Core 10 (Minimal API + SignalR) in `src/Cloud`; EF Core 10 + Npgsql 10.0.3; migrations generated with local tool `dotnet-ef` 10.0.13 and applied at start | Dapper; separate migrator | one stack, schema versioned in code | single instance owns the schema | multi-instance (later) → separate migration step |
+| D-02 | JWT bearer validation only: `Authority` (OIDC metadata over HTTPS) + `Audience` (the API resource, never a client id); `ValidAlgorithms` RS256/ES256/PS256; `ValidTypes` configurable (default `at+jwt`, `JWT`); roles from a configurable claim; `Viewer` (read) and `Operator` (read + commands, requires a valid `sub`); **fallback policy = authenticated user**; only health endpoints anonymous | self-issued tokens | user decision; no password handling in the Cloud | IdP issues role claims and `sub` | IdP without roles → map via `RoleClaimType` config |
+| D-03 | Edges are an allow-list in `Cloud:Edges`; messages whose topic edgeId ≠ payload edgeId or not allow-listed are dropped (logged, acknowledged); no auto-registration | auto-register from telemetry | a spoofed publisher cannot create edges | operators maintain the list | edge missing → add to config |
+| D-04 | Telemetry insert `ON CONFLICT DO NOTHING` on PK (`edge_id`,`stream_id`,`sequence`); samples with `timestampUtc > received + 2 min` dropped; latest value updated only when newer `timestamp_utc`; retention by `received_utc`; acknowledged after commit | dedupe in memory; retention by Edge timestamp | Edge delivers at-least-once; Edge clocks can be wrong | — | — |
+| D-05 | Commands: build + validate the `DeviceCommand` before any insert → insert `pending` → publish → `published`; not connected before publishing → `not_sent` (certainly not sent); publish attempted without a success PUBACK → `publish_unknown` (may have reached the Edge); never re-published automatically; Edge results accepted in **every** non-final status (`pending`, `published`, `publish_unknown`, `timed_out`) and final once stored; every status change guarded by the expected current status; `pending`/`published`/`publish_unknown` become `timed_out` after `expiresAt + grace`; optional `Idempotency-Key` unique **forever per user** (user decision), concurrent duplicates resolved by the unique index | auto-retry; 24 h key window; dropping results that arrive early | a lost PUBACK or an early result must never hide a real actuation; a retried HTTP request must not create a second actuation | Edge answers within TTL normally | many `publish_unknown`/`timed_out` → check broker/Edge connectivity |
+| D-06 | Cloud MQTT client: own `CloudMqttConnection` (TLS mandatory, username/password from env, persistent session, manual ack, back-off) — same rules as edge-agent D-03/D-07; client id `iiot-cloud`; subscribes `iiot/+/telemetry`, `iiot/+/command-results`. On a database error a handler retries in place with back-off; after 30 s it forces a reconnect so the broker redelivers the unacknowledged message (user decision); messages are processed sequentially meanwhile | shared library with the Edge; wait for the next session | `src/Shared` stays transport-free; MQTT does not redeliver within a session | single Cloud instance | scale-out → shared subscriptions (later) |
+| D-07 | SignalR hub `/hubs/live`: JWT (header, or `access_token` query for paths under `/hubs/live` only), Viewer policy, `CloseOnAuthenticationExpiration`; clients join per-edge groups (allow-listed only); server pushes `telemetry` and `commandUpdated` after commit; hosting request logs below Warning are off so query tokens are never logged | polling | live dashboards | — | — |
+| D-08 | `/health/live` = process up; `/health/ready` = cached DB + MQTT state refreshed by a `TimeProvider`-driven check (`Cloud:Health:RefreshSeconds`, default 15); no I/O per request; forwarded headers only from configured proxies (default lists cleared, `ForwardLimit = 1`); HTTPS terminated by the proxy | per-request DB ping | deferred finding: readiness probes must not load the DB | proxy in front (wave 4) | — |
+| D-09 | Tests: one PostgreSQL container per test run (xUnit collection fixture), a fresh database per host; database outages simulated with a switchable EF `DbCommandInterceptor`, never by stopping the shared container; JWT tests use a local RSA key through `StaticConfigurationManager`; test-only endpoints are added through an endpoint-module hook mapped after the auth middleware; receipts list the named probes (`--list-tests`) and require `Skipped: 0` | stopping containers; metadata over HTTP in tests | deterministic, fast, no cross-test interference | Docker running | — |
+
+## Coverage profile
+| ID | Outcome | Change kinds | Material surfaces | Ambiguity/action | Risk/evidence | Required proof |
+|---|---|---|---|---|---|---|
+| CP-01 | Cloud host starts only with valid config, migrates the DB, exposes health | add, integrate | Runtime/deploy (config, secrets, migrations, tooling), Data/schema | none | elevated | source (Testcontainers Postgres) |
+| CP-02 | Telemetry from allow-listed Edges is stored once, latest values kept, old rows purged after 90 days | add, integrate | Integration (MQTT/TLS), Data (dedupe, retention), Security (spoofed edgeId, future timestamps), Async (DB failure recovery) | none | critical — data integrity | source (TLS test broker + Postgres) |
+| CP-03 | Every API call is authenticated by a valid JWT and authorized by role | add | Security (JWT validation, roles, fallback, forwarded headers, logging) | none | critical — auth | source (test-signed tokens) |
+| CP-04 | Viewers read edges, latest values and history with bounded queries | add | API (routes, limits, errors), Data | none | elevated | source |
+| CP-05 | Operators issue commands that reach the Edge once, are audited, and end in a definite status reflecting the Edge's real outcome | add, integrate | API, Security (role, `sub`, audit), Async/state (publish, early/late results, timeout, idempotency, races) | none | critical — physical actuation | source |
+| CP-06 | Connected viewers receive live telemetry and command updates for edges they subscribe to | add | Integration (SignalR, JWT over WebSocket), Security (group authorization, token lifetime, log hygiene) | none | elevated | source |
+
+## Acceptance criteria
+| ID | EARS criterion | Proof |
+|---|---|---|
+| AC-01 | If any `Cloud:*` setting is invalid or the database cannot be migrated, the host shall fail during start; `/health/live` shall answer 200 without auth and `/health/ready` 200/503 from cached state. | task-01, task-02, task-03 |
+| AC-02 | When telemetry arrives on `iiot/{edgeId}/telemetry` from an allow-listed Edge whose payload `edgeId` matches the topic and whose timestamp is not more than 2 min ahead, the Cloud shall store it exactly once per (`edgeId`,`streamId`,`sequence`) and keep the newest value per tag; otherwise it shall drop it; if storing fails it shall retry and, after 30 s, reconnect so the message is redelivered. | task-02 |
+| AC-03 | While telemetry was received more than `Cloud:Retention:TelemetryDays` ago, the Cloud shall delete it. | task-02 |
+| AC-04 | If a request lacks a valid JWT (signature, algorithm, type, issuer, audience, lifetime), the API shall return 401; if the role is insufficient, 403; health endpoints shall stay anonymous; forwarded headers from unknown sources shall be ignored. | task-03 |
+| AC-05 | When a Viewer requests edges, latest values or history, the API shall return only allow-listed edges and bounded results (history ≤ 31 days, ≤ 10,000 rows). | task-03, task-04 |
+| AC-06 | When an Operator with a valid `sub` posts a valid command, the Cloud shall store it with that `sub`, publish exactly one `DeviceCommand`, and return 202 with its `commandId`; the same `Idempotency-Key` from the same user shall always return the same command without publishing again, also under concurrent requests. | task-05 |
+| AC-07 | When a `CommandResult` arrives for a command in any non-final status, the Cloud shall record that first Edge outcome; if publishing could not be confirmed, the status shall be `publish_unknown`, not `not_sent`; if no result arrives by `expiresAt + grace` — whether the command is `pending`, `published` or `publish_unknown` — it shall become `timed_out` and a later result shall still be recorded. | task-05 |
+| AC-08 | When telemetry or a command update is stored, the Cloud shall push it to SignalR clients subscribed to that edge; a client shall be refused without a valid token or the Viewer role, for non-allow-listed edges, and disconnected when its token expires; query tokens shall never appear in logs. | task-06 |
+
+## Tasks
+| # | Task | Priority | Criteria | Primary ownership | Dependencies | Status |
+|---|---|---|---|---|---|---|
+| 01 | Cloud host, config, PostgreSQL schema, health, test infrastructure | P1 | AC-01 | `src/Cloud/{IndustrialIot.Cloud.csproj,Program.cs,appsettings.json,CloudOptions.cs,CloudServiceCollectionExtensions.cs,EndpointModules.cs,Data/**,Health/**}`, `.config/dotnet-tools.json`, `tests/Cloud.Tests/{Cloud.Tests.csproj,CloudHostTests.cs,Infrastructure/**}`, `IndustrialIot.sln` | - | done |
+| 02 | MQTT connection + telemetry ingestion + retention | P1 | AC-01, AC-02, AC-03 | `src/Cloud/Messaging/**`, `src/Cloud/Ingestion/**`, `tests/Cloud.Tests/TelemetryIngestionTests.cs` | task-01 | done |
+| 03 | JWT authentication, roles, forwarded headers, edges endpoint | P1 | AC-01, AC-04, AC-05 | `src/Cloud/Security/**`, `src/Cloud/Api/{EdgesEndpoints.cs,ProblemMapping.cs}`, `tests/Cloud.Tests/AuthTests.cs` | task-02 | done |
+| 04 | Read API: latest values and history | P1 | AC-05 | `src/Cloud/Api/TelemetryEndpoints.cs`, `tests/Cloud.Tests/TelemetryApiTests.cs` | task-03 | done |
+| 05 | Command API, results, timeout, idempotency, audit | P1 | AC-06, AC-07 | `src/Cloud/Commands/**`, `src/Cloud/Api/CommandEndpoints.cs`, `tests/Cloud.Tests/{CommandApiTests.cs,CommandFlowTests.cs}` | task-04 | done |
+| 06 | SignalR live hub | P2 | AC-08 | `src/Cloud/Live/**`, `tests/Cloud.Tests/LiveHubTests.cs` | task-05 | done |
+| 07 | Test-gap closure (user decision at GATE-DONE 2026-10-19) | P1 | AC-02…AC-08 (proof only) | `tests/Cloud.Tests/TestGapTests.cs`, `tests/Cloud.Tests/Infrastructure/CloudTestHost.cs` | task-06 | done |
+
+Tasks run sequentially. Shared files modified by several tasks (one writer at a time): `src/Cloud/CloudServiceCollectionExtensions.cs`, `src/Cloud/Program.cs`, `src/Cloud/appsettings.json`, `src/Cloud/IndustrialIot.Cloud.csproj`, `src/Cloud/Data/**` (no new tables after task-01), `src/Cloud/Health/ReadinessMonitor.cs` (01, 02), `tests/Cloud.Tests/Infrastructure/**`, `tests/Cloud.Tests/Cloud.Tests.csproj`, plus the files task-06 lists. Each task's Ownership section is authoritative. Every task's Command is `dotnet test IndustrialIot.sln`; every Receipt also lists its named probes via `dotnet test tests/Cloud.Tests --list-tests` and shows `Skipped: 0`.
+
+## Review log
+- Round 1 (paper, 2026-10-18): 4 fresh reviewers (fact/contract, security, failure-mode + assumptions + scope, proof/integration), 31 raw findings → 15 after dedupe (1 Critical, 4 High, 10 Medium). Corrected while deduping: "the Edge never proved broker redelivery" — `UnhandledMessage_NotAcknowledged` (edge-agent task-04) proves redelivery on the next session; within a session there is none, which R-02 addresses.
+- GATE-REVIEW 2026-10-18: user accepted R-01…R-15; R-06 Idempotency-Key unique forever per user; R-02 retry in place, reconnect after 30 s.
+- Applied: R-01 → D-05, AC-07, task-05 statuses/guards/sweeper/probes; R-02 → D-06, AC-02, task-02; R-03 → D-09, task-01 fault interceptor, task-01/02 probes; R-04 → D-07, task-06 logging + probe; R-05 → D-09, task-01 `EndpointModules`, task-03 probes; R-06 → D-05, AC-06, task-01 index, task-05; R-07 → D-02, D-05, task-03 policy, task-05; R-08 → D-04, AC-02/AC-03, task-02; R-09 → D-02, D-09, task-03; R-10 → D-08, AC-04, task-03; R-11 → D-07, AC-08, task-06; R-12 → D-09, every Verification Plan; R-13 → task-02/03 probes; R-14 → D-08, task-01 health; R-15 → D-01, task-01 tooling + packages.
+- Closure pass (fresh reviewer, 2026-10-18): 13/15 PASS; R-01(c) lacked a probe for `pending`/`publish_unknown` → `timed_out`; R-11 token-expiry probe relied on a fake clock SignalR may not use; B3: `ReadinessMonitor.cs` missing from the shared list, `CloudMqttConnection` API needed by task-05 undefined, statuses `blocked` without a cause, back-off clock unspecified.
+- Round 2 (last paper round, technical only): probe `PendingOrUnknown_TimesOut` + AC-07 text (task-05); short real-lifetime token for the expiry probe (task-06); `CloudMqttConnection` API (`RegisterSubscription`, `PublishAsync` → `NotConnected`/`Unconfirmed`/`Confirmed`, `ForceReconnectAsync`) in task-02 and used by task-05; shared list updated; back-off on `TimeProvider`; test notes for the early-result interceptor, the concurrency barrier and TestServer's remote address. Sweep: files reread 7 / conflicts left 0. Paper rounds exhausted (2 of 2); every non-dependency blocker closed (GATE-REVIEW applied, Docker running) → tasks `pending`.
+
+## GATE-DONE
+- 2026-10-19: user accepted wave 3 as complete ("wave 3 thế là done rồi") after reviewing current receipts of tasks 01–07 (`dotnet test IndustrialIot.sln` exit 0; Shared 47, Edge 279, Cloud 98; `Skipped: 0`) and the listed limitations. Not yet committed.

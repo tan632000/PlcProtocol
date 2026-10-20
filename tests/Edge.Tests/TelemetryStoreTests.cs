@@ -156,20 +156,39 @@ public class TelemetryStoreTests
     }
 
     [Fact]
-    public async Task Acknowledge_RemovesOnlyThatRow()
+    public async Task AcknowledgeRange_RemovesOnlyThatRangeOfThisStream()
     {
         await using var edge = await StartAsync(new MutableClock(T0));
         var store = Store(edge);
-        await store.AppendBatchAsync(Enumerable.Range(0, 5).Select(i => Sample("A", i)).ToList(), default);
+        var stored = await store.AppendBatchAsync(Enumerable.Range(0, 6).Select(i => Sample("A", i)).ToList(), default);
+        var stream = stored[0].StreamId;
 
-        await store.AcknowledgeAsync(2, default);
-        await store.AcknowledgeAsync(0, default);
-        await store.AcknowledgeAsync(99, default); // unknown: no-op
+        Assert.Equal(2, await store.AcknowledgeRangeAsync(stream, 1, 2, default));
+        Assert.Equal(0, await store.AcknowledgeRangeAsync(Guid.NewGuid(), 0, 5, default)); // another stream: nothing
+        Assert.Equal(0, await store.AcknowledgeRangeAsync(stream, 1, 2, default));         // already gone
+        Assert.Equal(1, await store.AcknowledgeRangeAsync(stream, 5, 99, default));        // beyond the queue: only 5
 
-        Assert.Equal([1L, 3L, 4L], (await store.ReadBatchAsync(10, default)).Select(r => r.Sequence));
+        Assert.Equal([0L, 3L, 4L], (await store.ReadBatchAfterAsync(-1, 10, default)).Select(r => r.Sequence));
 
-        // Reading never removes anything: only an acknowledgement does.
-        Assert.Equal([1L, 3L, 4L], (await store.ReadBatchAsync(10, default)).Select(r => r.Sequence));
+        // Reading never removes anything: only a confirmation does.
+        Assert.Equal([3L, 4L], (await store.ReadBatchAfterAsync(0, 10, default)).Select(r => r.Sequence));
+        Assert.Equal([0L, 3L, 4L], (await store.ReadBatchAfterAsync(-1, 10, default)).Select(r => r.Sequence));
+    }
+
+    [Fact]
+    public async Task Counts_ExactWithGaps()
+    {
+        await using var edge = await StartAsync(new MutableClock(T0));
+        var store = Store(edge);
+        var stored = await store.AppendBatchAsync(Enumerable.Range(0, 10).Select(i => Sample("A", i)).ToList(), default);
+        await store.AcknowledgeRangeAsync(stored[0].StreamId, 2, 3, default);
+        await store.AcknowledgeRangeAsync(stored[0].StreamId, 7, 7, default);
+
+        // next_sequence − oldest would say 10; the queue holds 7.
+        Assert.Equal(7, await store.CountAsync(default));
+        Assert.Equal(3, await store.CountUpToAsync(4, default)); // 0, 1, 4
+        Assert.Equal(0, await store.CountUpToAsync(-1, default));
+        Assert.Equal(7, await store.CountUpToAsync(99, default));
     }
 
     [Fact]

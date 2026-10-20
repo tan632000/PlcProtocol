@@ -35,6 +35,7 @@ public sealed class MqttConnection : BackgroundService
     private TaskCompletionSource _disconnected = NewSignal();
     private CancellationToken _stopping;
     private volatile bool _started;
+    private long _generation;
 
     public MqttConnection(
         IOptions<MqttOptions> options,
@@ -59,6 +60,12 @@ public sealed class MqttConnection : BackgroundService
     }
 
     public bool IsConnected => _client.IsConnected;
+
+    /// <summary>
+    /// Incremented by every successful connect. A changed value tells a caller that the broker session was
+    /// re-established, e.g. so it can resend what the previous connection may have lost.
+    /// </summary>
+    public long ConnectionGeneration => Interlocked.Read(ref _generation);
 
     /// <summary>
     /// Registers the handler for one exact topic. Must happen before the host starts, so the first
@@ -232,6 +239,7 @@ public sealed class MqttConnection : BackgroundService
 
         _logger.LogInformation("MQTT connected to {Host}:{Port} (session present: {SessionPresent}).",
             _options.Host, _options.Port, result.IsSessionPresent);
+        Interlocked.Increment(ref _generation);
         Volatile.Read(ref _connected).TrySetResult();
     }
 

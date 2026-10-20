@@ -157,6 +157,9 @@ internal sealed class EdgeTestHost : IAsyncDisposable
         ["Edge:Mqtt:Password"] = "test-only-password",
         ["Edge:Mqtt:ReconnectMinDelayMs"] = "200",
         ["Edge:Mqtt:ReconnectMaxDelayMs"] = "1000",
+
+        // Off unless a test turns it on with a free port: parallel hosts would fight over 5080.
+        ["Edge:Monitor:Enabled"] = "false",
     };
 
     private static int ClosedPort()

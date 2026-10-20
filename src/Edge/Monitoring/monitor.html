@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PLC Monitor</title>
+<style>
+  :root {
+    --bg: #f4f5f7; --panel: #ffffff; --text: #1d2330; --muted: #667085; --border: #dfe3ea;
+    --ok: #1a7f37; --ok-bg: #e6f4ea; --bad: #c62828; --bad-bg: #fdecea; --warn: #9a6700; --warn-bg: #fff4d6;
+    --idle: #475467; --idle-bg: #eef0f3; --head: #f8f9fb;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #12151b; --panel: #1b1f27; --text: #e6e9ef; --muted: #98a2b3; --border: #2c323d;
+      --ok: #4ac26b; --ok-bg: #12301c; --bad: #ff7b72; --bad-bg: #3a1614; --warn: #e3b341; --warn-bg: #3a2d0c;
+      --idle: #b0b8c4; --idle-bg: #262b34; --head: #20252e;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 14px/1.45 "Segoe UI", system-ui, -apple-system, sans-serif; }
+  main { max-width: 1200px; margin: 0 auto; padding: 20px 16px 40px; }
+  header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 16px; margin-bottom: 16px; }
+  h1 { font-size: 20px; margin: 0; }
+  .muted { color: var(--muted); }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-bottom: 16px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; }
+  .card h2 { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 0 0 6px; }
+  .card .detail { font-size: 12px; color: var(--muted); margin-top: 4px; word-break: break-all; }
+  .badge { display: inline-block; padding: 2px 10px; border-radius: 999px; font-weight: 600; font-size: 13px; }
+  .ok { color: var(--ok); background: var(--ok-bg); }
+  .bad { color: var(--bad); background: var(--bad-bg); }
+  .warn { color: var(--warn); background: var(--warn-bg); }
+  .idle { color: var(--idle); background: var(--idle-bg); }
+  .big { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .table-wrap { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; min-width: 760px; }
+  th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { background: var(--head); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); font-weight: 600; }
+  tr:last-child td { border-bottom: 0; }
+  td.value { font-family: Consolas, "Cascadia Mono", monospace; font-size: 15px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  td.mono { font-family: Consolas, "Cascadia Mono", monospace; }
+  td.error { color: var(--bad); font-size: 12px; max-width: 320px; }
+  #banner { display: none; margin-bottom: 16px; padding: 10px 14px; border-radius: 8px; }
+  footer { margin-top: 12px; font-size: 12px; color: var(--muted); }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>PLC Monitor</h1>
+    <span class="muted">Edge ID: <strong id="edgeId">…</strong></span>
+    <span class="muted" id="updated"></span>
+  </header>
+
+  <div id="banner" class="bad"></div>
+
+  <section class="cards">
+    <div class="card">
+      <h2>PLC</h2>
+      <span id="plcState" class="badge idle">…</span>
+      <div class="detail" id="plcDetail"></div>
+    </div>
+    <div class="card">
+      <h2>Chu kỳ đọc gần nhất</h2>
+      <div class="big" id="lastCycle">—</div>
+      <div class="detail" id="pollDetail"></div>
+    </div>
+    <div class="card">
+      <h2>MQTT (gửi lên Cloud)</h2>
+      <span id="mqttState" class="badge idle">…</span>
+      <div class="detail" id="mqttDetail"></div>
+    </div>
+    <div class="card">
+      <h2>Buffer chờ gửi</h2>
+      <div class="big" id="pending">—</div>
+      <div class="detail">Số mẫu đang lưu trên máy, chưa gửi được lên Cloud</div>
+    </div>
+  </section>
+
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Tag</th><th>Địa chỉ</th><th>Kiểu</th><th>Giá trị</th><th>Chất lượng</th><th>Thời điểm đọc</th><th>Ghi</th><th>Lỗi</th>
+        </tr>
+      </thead>
+      <tbody id="tags"></tbody>
+    </table>
+  </div>
+
+  <footer>Chỉ xem — trang này không ghi xuống PLC. Tự cập nhật mỗi giây; giá trị là kết quả chu kỳ đọc gần nhất của Edge.</footer>
+</main>
+
+<script>
+  "use strict";
+  const $ = (id) => document.getElementById(id);
+
+  const PLC_STATES = {
+    ok: ["Đọc tốt", "ok"],
+    partial: ["Có tag lỗi", "warn"],
+    unavailable: ["Mất kết nối", "bad"],
+    waiting: ["Chưa có dữ liệu", "idle"],
+  };
+  const QUALITY = { good: ["Tốt", "ok"], bad: ["Lỗi", "bad"], uncertain: ["Không chắc", "warn"] };
+
+  function setBadge(el, text, cls) {
+    el.textContent = text;
+    el.className = "badge " + cls;
+  }
+
+  function formatTime(iso) {
+    if (!iso) return "—";
+    return new Date(iso).toLocaleTimeString("vi-VN", { hour12: false }) + "." +
+      String(new Date(iso).getMilliseconds()).padStart(3, "0");
+  }
+
+  function formatValue(value, type) {
+    if (value === null || value === undefined) return "—";
+    if (type === "Bool") return value ? "TRUE" : "FALSE";
+    return String(value);
+  }
+
+  function cell(text, cls) {
+    const td = document.createElement("td");
+    td.textContent = text;
+    if (cls) td.className = cls;
+    return td;
+  }
+
+  function badgeCell(text, cls) {
+    const td = document.createElement("td");
+    const span = document.createElement("span");
+    setBadge(span, text, cls);
+    td.appendChild(span);
+    return td;
+  }
+
+  function render(s) {
+    $("edgeId").textContent = s.edgeId;
+    $("banner").style.display = "none";
+
+    const now = new Date(s.nowUtc).getTime();
+    const last = s.lastCycleUtc ? new Date(s.lastCycleUtc).getTime() : null;
+    // Overdue: well past one interval plus a full PLC timeout, i.e. the poller has stalled.
+    const stale = last !== null && now - last > 3 * s.pollIntervalMs + s.plc.timeoutMs;
+
+    const [plcText, plcCls] = stale ? ["Dữ liệu cũ", "warn"] : (PLC_STATES[s.plc.state] || [s.plc.state, "idle"]);
+    setBadge($("plcState"), plcText, plcCls);
+    $("plcDetail").textContent = `${s.plc.host}:${s.plc.port} · Rack ${s.plc.rack} / Slot ${s.plc.slot}`;
+
+    $("lastCycle").textContent = last === null ? "—" : formatTime(s.lastCycleUtc);
+    $("pollDetail").textContent = last === null
+      ? `Chu kỳ ${s.pollIntervalMs} ms`
+      : `${((now - last) / 1000).toFixed(1)} giây trước · chu kỳ ${s.pollIntervalMs} ms`;
+
+    setBadge($("mqttState"), s.mqtt.connected ? "Đã kết nối" : "Chưa kết nối", s.mqtt.connected ? "ok" : "warn");
+    $("mqttDetail").textContent = `${s.mqtt.host}:${s.mqtt.port}`;
+
+    $("pending").textContent = s.bufferPending === null ? "?" : s.bufferPending.toLocaleString("vi-VN");
+
+    const rows = s.tags.map((t) => {
+      const tr = document.createElement("tr");
+      tr.appendChild(cell(t.tagId));
+      tr.appendChild(cell(t.address, "mono"));
+      tr.appendChild(cell(t.dataType));
+      tr.appendChild(cell(formatValue(t.value, t.dataType), "value"));
+      const [qText, qCls] = t.quality ? (QUALITY[t.quality] || [t.quality, "idle"]) : ["—", "idle"];
+      tr.appendChild(badgeCell(qText, qCls));
+      tr.appendChild(cell(formatTime(t.timestampUtc), "mono"));
+      tr.appendChild(cell(t.writable ? "Cho phép" : "Chỉ đọc"));
+      tr.appendChild(cell(t.error || "", "error"));
+      return tr;
+    });
+    $("tags").replaceChildren(...rows);
+
+    $("updated").textContent = "Cập nhật " + new Date().toLocaleTimeString("vi-VN", { hour12: false });
+  }
+
+  async function refresh() {
+    try {
+      const response = await fetch("/api/status", { cache: "no-store" });
+      if (!response.ok) throw new Error("HTTP " + response.status);
+      render(await response.json());
+    } catch (err) {
+      const banner = $("banner");
+      banner.textContent = "Không lấy được dữ liệu từ phần mềm Edge (" + err.message + "). Service IndustrialIot.Edge có đang chạy không?";
+      banner.style.display = "block";
+    } finally {
+      setTimeout(refresh, 1000);
+    }
+  }
+
+  refresh();
+</script>
+</body>
+</html>

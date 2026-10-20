@@ -2,6 +2,7 @@ using IndustrialIot.Edge.Buffering;
 using IndustrialIot.Edge.Commands;
 using IndustrialIot.Edge.Drivers;
 using IndustrialIot.Edge.Messaging;
+using IndustrialIot.Edge.Monitoring;
 using IndustrialIot.Edge.Polling;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Options;
@@ -41,6 +42,7 @@ public static class EdgeServiceCollectionExtensions
         // Must stay the first hosted service: it opens the database before anything uses it.
         services.AddHostedService<EdgeDatabaseStarter>();
 
+        services.TryAddSingleton<LiveTagSnapshot>();
         services.AddOptions<PollOptions>().Bind(configuration.GetSection(PollOptions.SectionName)).ValidateOnStart();
         services.TryAddEnumerable(ServiceDescriptor.Singleton<IValidateOptions<PollOptions>, PollOptionsValidator>());
         services.AddHostedService<TagPoller>();
@@ -55,6 +57,10 @@ public static class EdgeServiceCollectionExtensions
         services.TryAddSingleton<CommandLog>();
         services.TryAddSingleton<CommandExecutor>();
         services.AddHostedService<CommandListener>();
+
+        services.AddOptions<MonitorOptions>().Bind(configuration.GetSection(MonitorOptions.SectionName)).ValidateOnStart();
+        services.TryAddEnumerable(ServiceDescriptor.Singleton<IValidateOptions<MonitorOptions>, MonitorOptionsValidator>());
+        services.AddHostedService<MonitorServer>();
 
         return services;
     }

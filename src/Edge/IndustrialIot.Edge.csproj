@@ -2,10 +2,18 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.13" />
-    <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.12" />
     <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="10.0.12" />
     <PackageReference Include="MQTTnet" Version="5.2.0.1603" />
     <PackageReference Include="S7netplus" Version="0.20.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Kestrel for the local monitor page (Monitoring/MonitorServer.cs). -->
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="Monitoring\monitor.html" LogicalName="IndustrialIot.Edge.Monitoring.monitor.html" />
   </ItemGroup>
 
   <ItemGroup>

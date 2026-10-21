@@ -55,7 +55,7 @@ Specs-Contract: process-first-ready-v1
 | 01 | Broker TLS + identity ACLs + dev secrets, proven on real Mosquitto | P1 | AC-01, AC-02, AC-03, AC-05 | `deployments/mosquitto/**`, `deployments/scripts/dev-secrets.sh`, `tests/Deployment.Tests/**` | - | done |
 | 02 | Cloud image + compose trial stack with Keycloak + isolated smoke test + runbook | P1 | AC-04, AC-05 | `deployments/{compose.yaml,cloud/**,keycloak/**}`, `.dockerignore`, `deployments/scripts/{get-token.sh,smoke-test.sh}`, `docs/deployment.md` | task-01 | done |
 | 03 | Edge packaged and installed as a Windows Service | P2 | AC-06 | `src/Edge/{Program.cs,IndustrialIot.Edge.csproj}`, `deployments/edge/**`, `docs/deployment.md` (Edge section) | task-02 | blocked |
-| 04 | CI workflow on GitHub Actions | P2 | AC-07 | `.github/workflows/ci.yml` | task-03 | pending |
+| 04 | CI workflow on GitHub Actions | P2 | AC-07 | `.github/workflows/ci.yml` | task-03 | blocked |
 
 Tasks run sequentially. Shared files: `IndustrialIot.sln` (01), `.gitignore` (01), `docs/deployment.md` (02 creates, 03 adds the Edge section). Each task's Ownership section is authoritative.
 

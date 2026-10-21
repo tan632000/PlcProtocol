@@ -14,6 +14,8 @@ export IIOT_RESTART=no
 
 HELPER_IMAGE="eclipse-mosquitto@sha256:21421af7b32bf9ce508e9090c8eb13bb81f410ca778dc205506180a6f862d0eb"
 PROJECT="iiot-smoke"
+# The Cloud image this stack builds: its own name, never the trial stack's or a deployed one.
+export IIOT_CLOUD_IMAGE="${PROJECT}-cloud"
 API="http://127.0.0.1:8080"
 
 host_path() {
@@ -82,9 +84,13 @@ while IFS= read -r line; do
     || static_fail "secrets mount is not a single read-only file: $line"
 done < <(grep -v '^\s*#' "$compose_file" | grep -E '^\s*-' | grep -E 'secrets|IIOT_SECRETS')
 grep -v '^\s*#' "$compose_file" | grep -qE '^\s*(source|target):' && static_fail "long-syntax mounts are not allowed (cannot be checked)"
+# The one exemption: the Cloud line names the locally built image (or a digest chosen by CD).
+[ "$(grep -cxF '    image: ${IIOT_CLOUD_IMAGE:-iiot-cloud:local}' "$compose_file")" = 1 ] \
+  || static_fail "the Cloud image exemption must appear exactly once"
 while IFS= read -r line; do
   [[ "$line" == *@sha256:* ]] || static_fail "image without digest: $line"
-done < <(grep -hE '^\s*image:' "$compose_file"; grep -hE '^FROM ' "$root"/deployments/cloud/Dockerfile)
+done < <(grep -hE '^\s*image:' "$compose_file" | grep -vxF '    image: ${IIOT_CLOUD_IMAGE:-iiot-cloud:local}'
+         grep -hE '^FROM ' "$root"/deployments/cloud/Dockerfile)
 while IFS= read -r line; do
   [[ "$line" == *@sha256:* ]] || static_fail "script image without digest: $line"
 done < <(grep -hE '^[A-Z_]*IMAGE=' "$root"/deployments/scripts/*.sh)
@@ -156,20 +162,15 @@ else
 fi
 
 command='{"tagId":"Smoke.Never","value":1}'
-# --- SMOKE-04: a Viewer cannot command. ---
+# --- SMOKE-04: read-only default, the command API does not exist for a Viewer. ---
 code="$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $viewer" -H 'Content-Type: application/json' \
   -d "$command" "$API/api/v1/edges/smoke-edge/commands")"
-[ "$code" = "403" ] && pass SMOKE-04 "viewer POST -> 403" || fail SMOKE-04 "viewer POST -> $code (expected 403)"
+[ "$code" = "404" ] && pass SMOKE-04 "viewer POST -> 404 (read-only default)" || fail SMOKE-04 "viewer POST -> $code (expected 404)"
 
-# --- SMOKE-05: an Operator's command is published (to an Edge that does not exist anywhere). ---
-body="$(curl -s -w '\n%{http_code}' -X POST -H "Authorization: Bearer $operator" -H 'Content-Type: application/json' \
+# --- SMOKE-05: read-only default, nor for an Operator (Cloud:Commands:Enabled is off). ---
+code="$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $operator" -H 'Content-Type: application/json' \
   -d "$command" "$API/api/v1/edges/smoke-edge/commands")"
-code="${body##*$'\n'}"
-if [ "$code" = "202" ] && [[ "$body" == *'"status":"published"'* ]]; then
-  pass SMOKE-05 "operator POST -> 202 published"
-else
-  fail SMOKE-05 "operator POST -> $code"
-fi
+[ "$code" = "404" ] && pass SMOKE-05 "operator POST -> 404 (read-only default)" || fail SMOKE-05 "operator POST -> $code (expected 404)"
 
 # --- SMOKE-06: no private key or password in any layer of the Cloud image. ---
 image_ok=1
@@ -191,6 +192,8 @@ if docker save -o "$work/image.tar" "${PROJECT}-cloud" && tar --force-local -xf 
   # Layers of the pinned runtime base image (from Microsoft) are skipped by the generic PEM check only: Debian's
   # libgnutls ships an embedded sample key. The exact-match check below still covers every layer.
   base_image="$(grep -E '^FROM ' "$root/deployments/cloud/Dockerfile" | tail -1 | awk '{print $2}')"
+  # A BuildKit build does not keep the base image locally; without it no layer would be recognised as the base's.
+  docker pull --quiet "$base_image" >/dev/null || { echo "  could not pull the base image $base_image"; image_ok=0; }
   base_layers="$(docker image inspect "$base_image" --format '{{range .RootFS.Layers}}{{println .}}{{end}}' 2>/dev/null)"
   while IFS= read -r -d '' blob; do
     if [ "$(head -c2 "$blob" | od -An -tx1 | tr -d ' ')" = "1f8b" ]; then reader=(gzip -dc "$blob"); else reader=(cat "$blob"); fi

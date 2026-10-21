@@ -1,6 +1,7 @@
 # Task 04 — Every push and pull request runs the whole suite on Linux
 
-Status: pending
+Status: blocked
+Blocker: superseded by `specs/server-deploy/task-04-ci-workflow.md` (CI on pull requests to main, run by that packet; decided at its GATE-SCOPE, 2026-10-21).
 
 ## Outcome
 `.github/workflows/ci.yml` builds and tests the solution on `ubuntu-latest` for pushes and pull requests to `main`, failing on any failed or skipped test; a real GitHub Actions run proves it.

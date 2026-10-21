@@ -1,5 +1,6 @@
 using System.Buffers;
 using IndustrialIot.Edge.Messaging;
+using Microsoft.Extensions.Options;
 using MQTTnet;
 
 namespace IndustrialIot.Edge.Commands;
@@ -8,12 +9,17 @@ namespace IndustrialIot.Edge.Commands;
 /// Connects <see cref="CommandExecutor"/> to <c>iiot/{edgeId}/commands</c> and publishes results to
 /// <c>iiot/{edgeId}/command-results</c>. Results that could not be published (or stored) are sent again
 /// while connected; every re-send carries the identical payload, so the Cloud can deduplicate.
+/// <para>
+/// With <see cref="CommandsOptions.Enabled"/> off (the default) it does nothing at all: no subscription, no replay,
+/// no purge, so no command can reach the executor.
+/// </para>
 /// </summary>
 internal sealed class CommandListener(
     MqttConnection connection,
     MqttTopics topics,
     CommandExecutor executor,
     CommandLog log,
+    IOptions<CommandsOptions> options,
     TimeProvider clock,
     ILogger<CommandListener> logger) : BackgroundService
 {
@@ -25,8 +31,20 @@ internal sealed class CommandListener(
     private static readonly TimeSpan PurgeInterval = TimeSpan.FromHours(1);
     private const int ReplayBatch = 100;
 
+    private readonly bool _enabled = options.Value.Enabled;
+
     public override Task StartAsync(CancellationToken cancellationToken)
     {
+        if (!_enabled)
+        {
+            logger.LogInformation("Remote writes are disabled ({Key}=false); the Edge does not subscribe to commands.",
+                CommandsOptions.SectionName + ":Enabled");
+
+            // A write-mode run may have left the subscription and queued commands in the persistent session.
+            connection.RetireSubscription(topics.Commands);
+            return Task.CompletedTask;
+        }
+
         // Registered before the connection opens, so a command queued in the persistent session is never
         // delivered without a handler.
         connection.RegisterSubscription(topics.Commands, HandleAsync);

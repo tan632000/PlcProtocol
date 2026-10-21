@@ -1,0 +1,26 @@
+{
+  "profiles": {
+    "PLC + local broker": {
+      "commandName": "Project",
+      "environmentVariables": {
+        "DOTNET_ENVIRONMENT": "Development",
+        "Edge__Mqtt__Host": "127.0.0.1",
+        "Edge__Mqtt__Port": "8883"
+      }
+    },
+    "PLC test (no broker)": {
+      "commandName": "Project",
+      "environmentVariables": {
+        "DOTNET_ENVIRONMENT": "Development",
+        "Edge__Mqtt__Host": "no-broker.invalid",
+        "Edge__Mqtt__Password": "not-a-secret-no-broker"
+      }
+    },
+    "IndustrialIot.Edge": {
+      "commandName": "Project",
+      "environmentVariables": {
+        "DOTNET_ENVIRONMENT": "Development"
+      }
+    }
+  }
+}

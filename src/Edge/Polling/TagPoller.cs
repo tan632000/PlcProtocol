@@ -1,6 +1,7 @@
 using System.Text.Json;
 using IndustrialIot.Edge.Buffering;
 using IndustrialIot.Edge.Drivers;
+using IndustrialIot.Edge.Monitoring;
 using IndustrialIot.Shared.Common;
 using Microsoft.Extensions.Options;
 
@@ -11,11 +12,13 @@ namespace IndustrialIot.Edge.Polling;
 /// Cycle k is due at <c>start + k × interval</c>; a cycle that overruns skips the due times it missed
 /// instead of catching up in a burst. After the PLC turns out to be unreachable the poller also skips
 /// the next cycle, so the single driver connection is free for remote writes in between.
+/// Every cycle is also published to <see cref="LiveTagSnapshot"/> for the local monitor page.
 /// </summary>
 internal sealed class TagPoller(
     IPlcDriver driver,
     PlcTagCatalog catalog,
     TelemetryStore store,
+    LiveTagSnapshot snapshot,
     IOptions<PollOptions> options,
     TimeProvider clock,
     ILogger<TagPoller> logger) : BackgroundService
@@ -66,6 +69,8 @@ internal sealed class TagPoller(
     private async Task<bool> RunCycleAsync(CancellationToken ct)
     {
         var samples = new List<TelemetrySample>(catalog.Tags.Count);
+        var errors = new List<string?>(catalog.Tags.Count);
+        string? unavailableReason = null;
         var plcUnavailable = false;
         var unexpectedLogged = false;
 
@@ -74,25 +79,31 @@ internal sealed class TagPoller(
             if (plcUnavailable)
             {
                 samples.Add(Bad(tag));
+                errors.Add($"Not read: {unavailableReason}");
                 continue;
             }
 
             try
             {
                 var value = await driver.ReadAsync(tag.Address, tag.DataType, ct).ConfigureAwait(false);
-                samples.Add(ToSample(tag, value));
+                var sample = ToSample(tag, value);
+                samples.Add(sample);
+                errors.Add(sample.Quality == TelemetryQuality.Good ? null : "Value is not a finite number.");
             }
             catch (PlcUnavailableException ex)
             {
                 // Includes PlcBusyException. The other tags would only wait for the same timeout.
                 logger.LogWarning("PLC unavailable while reading {TagId}: {Message}", tag.TagId, ex.Message);
                 plcUnavailable = true;
+                unavailableReason = ex.Message;
                 samples.Add(Bad(tag));
+                errors.Add(ex.Message);
             }
             catch (Exception ex) when (ex is PlcAccessDeniedException or PlcValueException)
             {
                 logger.LogWarning("Reading {TagId} failed: {Message}", tag.TagId, ex.Message);
                 samples.Add(Bad(tag));
+                errors.Add(ex.Message);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
@@ -107,8 +118,15 @@ internal sealed class TagPoller(
                 }
 
                 samples.Add(Bad(tag));
+                errors.Add("Unexpected error; see the Edge log.");
             }
         }
+
+        // Before storing: the monitor shows what the PLC returned even when the disk is failing.
+        snapshot.Publish(new PollCycle(
+            clock.GetUtcNow(),
+            plcUnavailable,
+            [.. samples.Select((s, i) => new TagReading(s.TagId, s.Value, s.Quality, s.TimestampUtc, errors[i]))]));
 
         try
         {

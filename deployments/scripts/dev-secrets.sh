@@ -206,6 +206,8 @@ quiet openssl req -x509 -newkey rsa:3072 -nodes -keyout "$out/ca.key" -out "$out
   -addext "basicConstraints=critical,CA:TRUE,pathlen:0" \
   -addext "keyUsage=critical,keyCertSign,cRLSign" \
   -addext "subjectKeyIdentifier=hash"
+# The certificate is public and mounted into containers that run as other uids; umask 077 made it owner-only.
+chmod 644 "$out/ca.pem"
 echo "  ca.pem, ca.key (ca.key stays here: it is never mounted into a container)"
 
 mosquitto_san="DNS:mosquitto,DNS:localhost,IP:127.0.0.1"

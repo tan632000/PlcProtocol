@@ -29,12 +29,14 @@ public sealed class MqttConnection : BackgroundService
     private readonly X509Certificate2? _trustedCa;
     private readonly IMqttClient _client;
     private readonly ConcurrentDictionary<string, Func<MqttApplicationMessage, CancellationToken, Task>> _handlers = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, byte> _retired = new(StringComparer.Ordinal);
     private readonly Lock _registration = new();
 
     private TaskCompletionSource _connected = NewSignal();
     private TaskCompletionSource _disconnected = NewSignal();
     private CancellationToken _stopping;
     private volatile bool _started;
+    private long _generation;
 
     public MqttConnection(
         IOptions<MqttOptions> options,
@@ -61,6 +63,12 @@ public sealed class MqttConnection : BackgroundService
     public bool IsConnected => _client.IsConnected;
 
     /// <summary>
+    /// Incremented by every successful connect. A changed value tells a caller that the broker session was
+    /// re-established, e.g. so it can resend what the previous connection may have lost.
+    /// </summary>
+    public long ConnectionGeneration => Interlocked.Read(ref _generation);
+
+    /// <summary>
     /// Registers the handler for one exact topic. Must happen before the host starts, so the first
     /// connection already has every subscription and no queued message arrives without a handler.
     /// </summary>
@@ -76,9 +84,32 @@ public sealed class MqttConnection : BackgroundService
                 throw new InvalidOperationException("Subscriptions must be registered before the host has started.");
             }
 
-            if (!_handlers.TryAdd(topic, handler))
+            if (_retired.ContainsKey(topic) || !_handlers.TryAdd(topic, handler))
             {
                 throw new InvalidOperationException($"A handler for topic '{topic}' is already registered.");
+            }
+        }
+    }
+
+    /// <summary>
+    /// Marks a topic this client no longer serves. The persistent session may still hold its subscription and queued
+    /// messages from an earlier configuration: anything delivered on it is acknowledged and discarded (never left
+    /// unacknowledged, where it would be redelivered forever and occupy in-flight slots), and the topic is unsubscribed
+    /// after every connect. Same registration window as <see cref="RegisterSubscription"/>.
+    /// </summary>
+    public void RetireSubscription(string topic)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(topic);
+        lock (_registration)
+        {
+            if (_started)
+            {
+                throw new InvalidOperationException("Subscriptions must be retired before the host has started.");
+            }
+
+            if (_handlers.ContainsKey(topic) || !_retired.TryAdd(topic, 0))
+            {
+                throw new InvalidOperationException($"Topic '{topic}' is already registered or retired.");
             }
         }
     }
@@ -230,8 +261,11 @@ public sealed class MqttConnection : BackgroundService
             throw;
         }
 
+        await UnsubscribeRetiredAsync(ct).ConfigureAwait(false);
+
         _logger.LogInformation("MQTT connected to {Host}:{Port} (session present: {SessionPresent}).",
             _options.Host, _options.Port, result.IsSessionPresent);
+        Interlocked.Increment(ref _generation);
         Volatile.Read(ref _connected).TrySetResult();
     }
 
@@ -272,10 +306,57 @@ public sealed class MqttConnection : BackgroundService
         return chain.Build(leaf);
     }
 
+    /// <summary>Best effort: a failure only means the next connect tries again; retired messages are discarded anyway.</summary>
+    private async Task UnsubscribeRetiredAsync(CancellationToken ct)
+    {
+        if (_retired.IsEmpty)
+        {
+            return;
+        }
+
+        try
+        {
+            var unsubscribe = new MqttClientUnsubscribeOptionsBuilder();
+            foreach (var topic in _retired.Keys)
+            {
+                unsubscribe.WithTopicFilter(topic);
+            }
+
+            var result = await _client.UnsubscribeAsync(unsubscribe.Build(), ct).ConfigureAwait(false);
+            _logger.LogDebug("Unsubscribed retired topic(s): {Results}.",
+                string.Join(", ", result.Items.Select(i => $"{i.TopicFilter}={i.ResultCode}")));
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+        {
+            _logger.LogDebug("Unsubscribing retired topic(s) failed ({Reason}); retried on the next connect.", ex.GetBaseException().Message);
+        }
+    }
+
+    private async Task AcknowledgeQuietlyAsync(MqttApplicationMessageReceivedEventArgs e)
+    {
+        try
+        {
+            await e.AcknowledgeAsync(_stopping).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            // The connection dropped: the broker delivers it again and it is discarded again.
+            _logger.LogDebug(ex, "Acknowledging a discarded message failed.");
+        }
+    }
+
     private async Task OnMessageReceivedAsync(MqttApplicationMessageReceivedEventArgs e)
     {
         e.AutoAcknowledge = false;
         var message = e.ApplicationMessage;
+
+        // Left over from an earlier configuration (e.g. commands before they were switched off): acknowledged, not handled.
+        if (_retired.ContainsKey(message.Topic))
+        {
+            _logger.LogInformation("Discarded a message on retired topic '{Topic}'.", message.Topic);
+            await AcknowledgeQuietlyAsync(e).ConfigureAwait(false);
+            return;
+        }
 
         // Exact topic match only; retained messages are stale state, not commands.
         if (message.Retain || !_handlers.TryGetValue(message.Topic, out var handler))

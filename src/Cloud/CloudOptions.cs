@@ -29,10 +29,17 @@ public sealed class EdgesOptions
     public bool IsAllowed(string edgeId) => Edges.Any(e => string.Equals(e.EdgeId, edgeId, StringComparison.Ordinal));
 }
 
-/// <summary>Command lifetimes, bound from <c>Cloud:Commands</c>.</summary>
+/// <summary>Remote writes and their lifetimes, bound from <c>Cloud:Commands</c>.</summary>
 public sealed class CommandOptions
 {
     public const string SectionName = "Cloud:Commands";
+
+    /// <summary>
+    /// Off by default: the Cloud (and any SCADA built on it) only displays data. Off means no command route is mapped
+    /// (404), no command result is consumed and no timeout sweep runs. A write also needs the Edge switch, the broker's
+    /// command ACL and a writable tag. Read at start; changing it needs a restart.
+    /// </summary>
+    public bool Enabled { get; set; }
 
     public int DefaultTtlSeconds { get; set; } = 60;
 

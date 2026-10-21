@@ -16,6 +16,18 @@ public class ContractRoundTripTests
     private const string ResultJson =
         """{"schemaVersion":1,"commandId":"5d1c2a3b-0000-4000-8000-000000000001","edgeId":"edge-01","outcome":"rejected","reason":"tag_not_writable","completedAtUtc":"2026-10-13T08:00:01.500Z"}""";
 
+    private const string AckJson =
+        """{"schemaVersion":1,"edgeId":"edge-01","streamId":"0f8fad5b-d9cb-469f-a165-70867728950e","fromSequence":40,"toSequence":42}""";
+
+    internal static TelemetryAck SampleAck() => new()
+    {
+        SchemaVersion = 1,
+        EdgeId = "edge-01",
+        StreamId = Guid.Parse("0f8fad5b-d9cb-469f-a165-70867728950e"),
+        FromSequence = 40,
+        ToSequence = 42,
+    };
+
     internal static TelemetryPayload SampleTelemetry() => new()
     {
         SchemaVersion = 1,
@@ -60,6 +72,7 @@ public class ContractRoundTripTests
         Assert.Equal(telemetry, ContractJson.Deserialize<TelemetryPayload>(ContractJson.Serialize(telemetry)));
         Assert.Equal(command, ContractJson.Deserialize<DeviceCommand>(ContractJson.Serialize(command)));
         Assert.Equal(result, ContractJson.Deserialize<CommandResult>(ContractJson.Serialize(result)));
+        Assert.Equal(SampleAck(), ContractJson.Deserialize<TelemetryAck>(ContractJson.Serialize(SampleAck())));
 
         // Telemetry with a non-good quality carries a null value and must also round-trip.
         var badSample = telemetry with { Value = null, Quality = TelemetryQuality.Bad };
@@ -72,11 +85,13 @@ public class ContractRoundTripTests
         Assert.Equal(TelemetryJson, ContractJson.Serialize(SampleTelemetry()));
         Assert.Equal(CommandJson, ContractJson.Serialize(SampleCommand()));
         Assert.Equal(ResultJson, ContractJson.Serialize(SampleResult()));
+        Assert.Equal(AckJson, ContractJson.Serialize(SampleAck()));
 
         // The snapshot text is also accepted as input and equals the C# sample.
         Assert.Equal(SampleTelemetry(), ContractJson.Deserialize<TelemetryPayload>(TelemetryJson));
         Assert.Equal(SampleCommand(), ContractJson.Deserialize<DeviceCommand>(CommandJson));
         Assert.Equal(SampleResult(), ContractJson.Deserialize<CommandResult>(ResultJson));
+        Assert.Equal(SampleAck(), ContractJson.Deserialize<TelemetryAck>(AckJson));
     }
 
     [Theory]
@@ -118,6 +133,14 @@ public class ContractRoundTripTests
     [InlineData("telemetry", """{"schemaVersion":1,"edgeId":"edge-01","streamId":"0f8fad5b-d9cb-469f-a165-70867728950e","sequence":1,"tagId":"t","value":1,"quality":"good","timestampUtc":"2026-10-13T08:00Z"}""")] // no seconds
     [InlineData("telemetry", """{"schemaVersion":1,"edgeId":"edge-01","streamId":"0f8fad5b-d9cb-469f-a165-70867728950e","sequence":1,"tagId":"t","value":1,"quality":"good","timestampUtc":"2026-10-13T08:00:00+07:00Z"}""")]
     [InlineData("telemetry", """{"schemaVersion":1,"edgeId":"edge-01","edgeId":"edge-02","streamId":"0f8fad5b-d9cb-469f-a165-70867728950e","sequence":1,"tagId":"t","value":1,"quality":"good","timestampUtc":"2026-10-13T08:00:00.000Z"}""")] // duplicate property
+    // TelemetryAck
+    [InlineData("ack", """{"schemaVersion":2,"edgeId":"edge-01","streamId":"0f8fad5b-d9cb-469f-a165-70867728950e","fromSequence":1,"toSequence":1}""")]
+    [InlineData("ack", """{"schemaVersion":1,"edgeId":"edge 01","streamId":"0f8fad5b-d9cb-469f-a165-70867728950e","fromSequence":1,"toSequence":1}""")]
+    [InlineData("ack", """{"schemaVersion":1,"edgeId":"edge-01","streamId":"00000000-0000-0000-0000-000000000000","fromSequence":1,"toSequence":1}""")]
+    [InlineData("ack", """{"schemaVersion":1,"edgeId":"edge-01","streamId":"0f8fad5b-d9cb-469f-a165-70867728950e","fromSequence":-1,"toSequence":1}""")] // negative
+    [InlineData("ack", """{"schemaVersion":1,"edgeId":"edge-01","streamId":"0f8fad5b-d9cb-469f-a165-70867728950e","fromSequence":5,"toSequence":4}""")] // reversed
+    [InlineData("ack", """{"schemaVersion":1,"edgeId":"edge-01","streamId":"0f8fad5b-d9cb-469f-a165-70867728950e","fromSequence":0,"toSequence":10000}""")] // 10 001 sequences
+    [InlineData("ack", """{"schemaVersion":1,"edgeId":"edge-01","streamId":"0f8fad5b-d9cb-469f-a165-70867728950e","fromSequence":1}""")] // missing toSequence
     // Not even an object
     [InlineData("result", "{")]
     [InlineData("result", "null")]
@@ -125,6 +148,18 @@ public class ContractRoundTripTests
     {
         // Only ContractValidationException may escape: never a raw JsonException.
         Assert.Throws<ContractValidationException>(() => Deserialize(kind, json));
+    }
+
+    [Fact]
+    public void TelemetryAck_RangeBoundsAccepted()
+    {
+        // One sequence, and the widest range allowed (10 000 sequences: 0..9999).
+        var single = SampleAck() with { FromSequence = 7, ToSequence = 7 };
+        var widest = SampleAck() with { FromSequence = 0, ToSequence = TelemetryAck.MaxRangeWidth - 1 };
+
+        Assert.Equal(single, ContractJson.Deserialize<TelemetryAck>(ContractJson.Serialize(single)));
+        Assert.Equal(widest, ContractJson.Deserialize<TelemetryAck>(ContractJson.Serialize(widest)));
+        Assert.Throws<ContractValidationException>(() => ContractJson.Serialize(widest with { ToSequence = TelemetryAck.MaxRangeWidth }));
     }
 
     [Fact]
@@ -209,6 +244,7 @@ public class ContractRoundTripTests
         "telemetry" => ContractJson.Deserialize<TelemetryPayload>(json),
         "command" => ContractJson.Deserialize<DeviceCommand>(json),
         "result" => ContractJson.Deserialize<CommandResult>(json),
+        "ack" => ContractJson.Deserialize<TelemetryAck>(json),
         _ => throw new ArgumentOutOfRangeException(nameof(kind)),
     };
 }

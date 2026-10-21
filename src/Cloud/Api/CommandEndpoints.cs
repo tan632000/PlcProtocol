@@ -41,6 +41,12 @@ internal sealed class CommandEndpoints : IEndpointModule
 
     public void Map(IEndpointRouteBuilder endpoints)
     {
+        // Read-only by default: with commands off none of the routes exists (404), reads of old commands included.
+        if (!endpoints.ServiceProvider.GetRequiredService<IOptions<CommandOptions>>().Value.Enabled)
+        {
+            return;
+        }
+
         endpoints.MapPost("/api/v1/edges/{edgeId}/commands", PostAsync).RequireAuthorization(Policies.Operator);
         endpoints.MapGet("/api/v1/commands/{commandId:guid}", GetAsync).RequireAuthorization(Policies.Viewer);
         endpoints.MapGet("/api/v1/edges/{edgeId}/commands", ListAsync).RequireAuthorization(Policies.Viewer);

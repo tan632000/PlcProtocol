@@ -45,6 +45,7 @@ public sealed class CloudMqttConnection : BackgroundService
     private readonly X509Certificate2? _trustedCa;
     private readonly IMqttClient _client;
     private readonly List<(string Filter, Func<MqttApplicationMessage, CancellationToken, Task> Handler)> _handlers = [];
+    private readonly List<string> _retired = [];
     private readonly Lock _registration = new();
 
     private TaskCompletionSource _disconnected = NewSignal();
@@ -97,12 +98,37 @@ public sealed class CloudMqttConnection : BackgroundService
                 throw new InvalidOperationException("Subscriptions must be registered before the host has started.");
             }
 
-            if (_handlers.Exists(h => h.Filter == topicFilter))
+            if (_retired.Contains(topicFilter) || _handlers.Exists(h => h.Filter == topicFilter))
             {
                 throw new InvalidOperationException($"A handler for topic filter '{topicFilter}' is already registered.");
             }
 
             _handlers.Add((topicFilter, handler));
+        }
+    }
+
+    /// <summary>
+    /// Marks a topic filter this Cloud no longer serves. The persistent session may still hold its subscription and
+    /// queued messages from an earlier configuration: anything delivered on it is acknowledged and discarded (never left
+    /// unacknowledged, where it would be redelivered forever and occupy in-flight slots), and the filter is unsubscribed
+    /// after every connect. Same registration window as <see cref="RegisterSubscription"/>.
+    /// </summary>
+    public void RetireSubscription(string topicFilter)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(topicFilter);
+        lock (_registration)
+        {
+            if (_started)
+            {
+                throw new InvalidOperationException("Subscriptions must be retired before the host has started.");
+            }
+
+            if (_retired.Contains(topicFilter) || _handlers.Exists(h => h.Filter == topicFilter))
+            {
+                throw new InvalidOperationException($"Topic filter '{topicFilter}' is already registered or retired.");
+            }
+
+            _retired.Add(topicFilter);
         }
     }
 
@@ -294,6 +320,8 @@ public sealed class CloudMqttConnection : BackgroundService
             throw;
         }
 
+        await UnsubscribeRetiredAsync(ct).ConfigureAwait(false);
+
         _logger.LogInformation("MQTT connected to {Host}:{Port} (session present: {SessionPresent}).",
             _options.Host, _options.Port, result.IsSessionPresent);
     }
@@ -353,10 +381,53 @@ public sealed class CloudMqttConnection : BackgroundService
         return chain.Build(leaf);
     }
 
+    /// <summary>Best effort: a failure only means the next connect tries again; retired messages are discarded anyway.</summary>
+    private async Task UnsubscribeRetiredAsync(CancellationToken ct)
+    {
+        if (_retired.Count == 0)
+        {
+            return;
+        }
+
+        try
+        {
+            var unsubscribe = new MqttClientUnsubscribeOptionsBuilder();
+            foreach (var filter in _retired)
+            {
+                unsubscribe.WithTopicFilter(filter);
+            }
+
+            var result = await _client.UnsubscribeAsync(unsubscribe.Build(), ct).ConfigureAwait(false);
+            _logger.LogDebug("Unsubscribed retired topic filter(s): {Results}.",
+                string.Join(", ", result.Items.Select(i => $"{i.TopicFilter}={i.ResultCode}")));
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+        {
+            _logger.LogDebug("Unsubscribing retired topic filter(s) failed ({Reason}); retried on the next connect.", ex.GetBaseException().Message);
+        }
+    }
+
     private async Task OnMessageReceivedAsync(MqttApplicationMessageReceivedEventArgs e)
     {
         e.AutoAcknowledge = false;
         var message = e.ApplicationMessage;
+
+        // Left over from an earlier configuration (e.g. command results before commands were switched off).
+        if (_retired.Exists(filter => MqttTopicFilter.Matches(filter, message.Topic)))
+        {
+            _logger.LogInformation("Discarded a message on retired topic '{Topic}'.", message.Topic);
+            try
+            {
+                await e.AcknowledgeAsync(_stopping).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is not OutOfMemoryException)
+            {
+                // The connection dropped: the broker delivers it again and it is discarded again.
+                _logger.LogDebug(ex, "Acknowledging a discarded message failed.");
+            }
+
+            return;
+        }
 
         // Retained messages are stale state, not fresh telemetry or results.
         var handler = message.Retain ? null : _handlers.Find(h => MqttTopicFilter.Matches(h.Filter, message.Topic)).Handler;

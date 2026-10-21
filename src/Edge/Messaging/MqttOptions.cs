@@ -29,6 +29,18 @@ public sealed class MqttOptions
     public int ReconnectMaxDelayMs { get; set; } = 30_000;
 
     public int PublishBatchSize { get; set; } = 100;
+
+    /// <summary>
+    /// Most samples sent but not yet confirmed by the Cloud (<c>TelemetryAck</c>). Bounds what one Edge can put in
+    /// the broker's queue for an offline Cloud.
+    /// </summary>
+    public int MaxUnacknowledged { get; set; } = 500;
+
+    /// <summary>
+    /// Without a Cloud confirmation for this long, unconfirmed samples are sent again from the oldest; the wait
+    /// doubles after every resend (up to 600 s) and returns to this value once a confirmation arrives.
+    /// </summary>
+    public int AckTimeoutSeconds { get; set; } = 30;
 }
 
 /// <summary>Messages name the key only — never the value, which may be the password.</summary>
@@ -82,6 +94,16 @@ internal sealed class MqttOptionsValidator : IValidateOptions<MqttOptions>
         if (o.PublishBatchSize is < 1 or > 1000)
         {
             failures.Add($"{s}:PublishBatchSize must be within 1..1000.");
+        }
+
+        if (o.MaxUnacknowledged is < 1 or > 5000)
+        {
+            failures.Add($"{s}:MaxUnacknowledged must be within 1..5000.");
+        }
+
+        if (o.AckTimeoutSeconds is < 5 or > 600)
+        {
+            failures.Add($"{s}:AckTimeoutSeconds must be within 5..600.");
         }
 
         return failures.Count == 0 ? ValidateOptionsResult.Success : ValidateOptionsResult.Fail(failures);

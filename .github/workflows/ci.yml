@@ -1,0 +1,54 @@
+name: CI
+
+# Checks every pull request into main. cd.yml calls this workflow before it builds and deploys, so a push that
+# skipped the pull request is still tested. The job ids `test` and `smoke` are the required checks of main's branch
+# protection (docs/server-deploy.md): keep them, and do not give the jobs a different `name:`.
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+# A newer push to the same pull request replaces its running checks; other runs (called by CD, dispatched) never
+# share a group, so nothing cancels a check a deploy is waiting for.
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('ci-{0}', github.ref) || format('ci-run-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          global-json-file: global.json
+      - run: dotnet restore
+      - run: dotnet build --no-restore -c Release
+      - run: dotnet test --no-build -c Release --logger trx --results-directory TestResults
+      # A skipped test is not a pass: fail the job when any result did not execute.
+      - name: Fail on tests that did not run
+        run: |
+          shopt -s nullglob
+          files=(TestResults/*.trx)
+          [ "${#files[@]}" -gt 0 ] || { echo "no TRX file was written"; exit 1; }
+          not_executed="$(cat "${files[@]}" | { grep -o 'outcome="NotExecuted"' || true; } | wc -l)" # 0 matches is fine, even under pipefail
+          echo "${#files[@]} TRX file(s), ${not_executed} not executed"
+          [ "$not_executed" -eq 0 ]
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: test-results
+          path: TestResults
+          if-no-files-found: warn
+
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: bash deployments/scripts/smoke-test.sh

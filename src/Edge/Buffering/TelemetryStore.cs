@@ -16,7 +16,8 @@ public sealed record StoredTelemetry(long Sequence, string Payload);
 /// <summary>
 /// Durable telemetry queue (store-and-forward). Samples get their <c>streamId</c> and consecutive
 /// <c>sequence</c> in the same transaction that stores them, so a crash can never hand out a number
-/// twice or skip one. Rows leave the queue only when acknowledged (published) or purged by the limits.
+/// twice or skip one. Rows leave the queue only when the Cloud confirms them (<c>TelemetryAck</c>) or when
+/// the age/row limits purge them.
 /// </summary>
 public sealed class TelemetryStore
 {
@@ -165,30 +166,75 @@ public sealed class TelemetryStore
         return rows;
     }
 
-    /// <summary>Removes a published sample. An unknown sequence is ignored.</summary>
-    public async Task AcknowledgeAsync(long sequence, CancellationToken ct)
+    /// <summary>Oldest queued samples with a sequence above <paramref name="afterSequence"/>.</summary>
+    public async Task<IReadOnlyList<StoredTelemetry>> ReadBatchAfterAsync(long afterSequence, int max, CancellationToken ct)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThan(max, 1);
+
+        await using var connection = await _database.OpenConnectionAsync(ct).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT sequence, payload FROM telemetry WHERE sequence > $after ORDER BY sequence LIMIT $max;";
+        command.Parameters.AddWithValue("$after", afterSequence);
+        command.Parameters.AddWithValue("$max", max);
+
+        var rows = new List<StoredTelemetry>();
+        await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
+        while (await reader.ReadAsync(ct).ConfigureAwait(false))
+        {
+            rows.Add(new StoredTelemetry(reader.GetInt64(0), reader.GetString(1)));
+        }
+
+        return rows;
+    }
+
+    /// <summary>The smallest queued sequence, or null when the queue is empty.</summary>
+    public async Task<long?> OldestSequenceAsync(CancellationToken ct)
     {
         await using var connection = await _database.OpenConnectionAsync(ct).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
-        command.CommandText = "DELETE FROM telemetry WHERE sequence = $sequence;";
+        command.CommandText = "SELECT MIN(sequence) FROM telemetry;";
+        return await command.ExecuteScalarAsync(ct).ConfigureAwait(false) is long oldest ? oldest : null;
+    }
+
+    /// <summary>Queued samples with a sequence up to and including <paramref name="sequence"/>.</summary>
+    public async Task<long> CountUpToAsync(long sequence, CancellationToken ct)
+    {
+        await using var connection = await _database.OpenConnectionAsync(ct).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT COUNT(*) FROM telemetry WHERE sequence <= $sequence;";
         command.Parameters.AddWithValue("$sequence", sequence);
-        await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+        return (long)(await command.ExecuteScalarAsync(ct).ConfigureAwait(false))!;
     }
 
     /// <summary>
-    /// Queued rows, as <c>next_sequence − oldest sequence</c>: exact unless acknowledgements left holes,
-    /// and never a full table scan.
+    /// Removes the samples a Cloud <c>TelemetryAck</c> confirmed. An ack for another stream (an older database)
+    /// removes nothing. Returns the number of rows removed (0 for samples already gone).
+    /// </summary>
+    public async Task<int> AcknowledgeRangeAsync(Guid streamId, long fromSequence, long toSequence, CancellationToken ct)
+    {
+        await using var connection = await _database.OpenConnectionAsync(ct).ConfigureAwait(false);
+        if (Guid.Parse(await ReadMetaAsync(connection, null, "stream_id", ct).ConfigureAwait(false)) != streamId)
+        {
+            return 0;
+        }
+
+        await using var command = connection.CreateCommand();
+        command.CommandText = "DELETE FROM telemetry WHERE sequence BETWEEN $from AND $to;";
+        command.Parameters.AddWithValue("$from", fromSequence);
+        command.Parameters.AddWithValue("$to", toSequence);
+        return await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Queued rows. Exact even when confirmations left gaps in the sequence (acks arrive per sample, possibly
+    /// out of order), so the row limit and the monitor page never over-count.
     /// </summary>
     public async Task<long> CountAsync(CancellationToken ct)
     {
-        // One statement, so next_sequence and the oldest row come from the same snapshot.
         await using var connection = await _database.OpenConnectionAsync(ct).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
-        command.CommandText =
-            "SELECT CAST((SELECT value FROM meta WHERE key = 'next_sequence') AS INTEGER), (SELECT MIN(sequence) FROM telemetry);";
-        await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
-        await reader.ReadAsync(ct).ConfigureAwait(false);
-        return reader.IsDBNull(1) ? 0 : reader.GetInt64(0) - reader.GetInt64(1);
+        command.CommandText = "SELECT COUNT(*) FROM telemetry;";
+        return (long)(await command.ExecuteScalarAsync(ct).ConfigureAwait(false))!;
     }
 
     /// <summary>Drops samples beyond the age and row limits, oldest first. Returns the number dropped.</summary>

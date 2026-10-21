@@ -1,0 +1,196 @@
+using System.Text.Json;
+using IndustrialIot.Edge.Buffering;
+using IndustrialIot.Edge.Drivers;
+using IndustrialIot.Edge.Messaging;
+using IndustrialIot.Edge.Polling;
+using IndustrialIot.Shared.Common;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.Options;
+
+namespace IndustrialIot.Edge.Monitoring;
+
+/// <summary>
+/// Serves the local monitor page (<c>/</c>) and its data (<c>/api/status</c>) on <c>localhost</c> only.
+/// Read-only by design: it shows the poller's last cycle, the MQTT link and the buffer backlog, never
+/// talks to the PLC itself and offers no way to write. A port that is already taken is logged and the
+/// Edge keeps running without the page.
+/// </summary>
+internal sealed class MonitorServer(
+    IOptions<MonitorOptions> options,
+    IOptions<EdgeOptions> edge,
+    IOptions<SiemensS7Options> plc,
+    IOptions<MqttOptions> mqtt,
+    IOptions<PollOptions> poll,
+    PlcTagCatalog catalog,
+    LiveTagSnapshot snapshot,
+    TelemetryStore store,
+    MqttConnection mqttConnection,
+    TimeProvider clock,
+    ILogger<MonitorServer> logger) : IHostedService, IAsyncDisposable
+{
+    private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
+    private static readonly Lazy<string> Page = new(LoadPage);
+
+    // DNS rebinding guard: a web page from elsewhere could resolve its own name to 127.0.0.1.
+    private static readonly HashSet<string> AllowedHosts = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "localhost", "127.0.0.1", "[::1]", "::1",
+    };
+
+    private WebApplication? _app;
+
+    public async Task StartAsync(CancellationToken cancellationToken)
+    {
+        var settings = options.Value;
+        if (!settings.Enabled)
+        {
+            return;
+        }
+
+        var builder = WebApplication.CreateEmptyBuilder(new WebApplicationOptions());
+        builder.WebHost.UseKestrelCore().ConfigureKestrel(kestrel => kestrel.ListenLocalhost(settings.Port));
+        builder.Services.AddRoutingCore();
+
+        var app = builder.Build();
+        app.Use(GuardAsync);
+        app.MapGet("/", () => Results.Content(Page.Value, "text/html; charset=utf-8"));
+        app.MapGet("/api/status", async (CancellationToken ct) => Results.Json(await BuildStatusAsync(ct).ConfigureAwait(false), Json));
+
+        try
+        {
+            await app.StartAsync(cancellationToken).ConfigureAwait(false);
+            _app = app;
+            logger.LogInformation("Monitor page: http://localhost:{Port}/", settings.Port);
+        }
+        catch (IOException ex)
+        {
+            logger.LogError("Monitor page disabled: port {Port} is not available ({Reason}).", settings.Port, ex.Message);
+            await app.DisposeAsync().ConfigureAwait(false);
+        }
+    }
+
+    public async Task StopAsync(CancellationToken cancellationToken)
+    {
+        if (_app is { } app)
+        {
+            await app.StopAsync(cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (Interlocked.Exchange(ref _app, null) is { } app)
+        {
+            await app.DisposeAsync().ConfigureAwait(false);
+        }
+    }
+
+    internal async Task<MonitorStatus> BuildStatusAsync(CancellationToken ct)
+    {
+        var cycle = snapshot.Latest;
+        var readings = cycle?.Readings.ToDictionary(r => r.TagId, StringComparer.Ordinal);
+
+        var tags = catalog.Tags.Select(tag =>
+        {
+            TagReading? reading = null;
+            readings?.TryGetValue(tag.TagId, out reading);
+            return new TagStatus(
+                tag.TagId,
+                tag.Address.Canonical,
+                tag.DataType.ToString(),
+                tag.Writable,
+                reading?.Value,
+                reading is null ? null : QualityName(reading.Quality),
+                reading?.TimestampUtc,
+                reading?.Error);
+        }).ToList();
+
+        long? pending;
+        try
+        {
+            pending = await store.CountAsync(ct).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            pending = null; // The page shows "unknown"; the store logs its own failures.
+        }
+
+        var plcState = cycle switch
+        {
+            null => "waiting",
+            { PlcUnavailable: true } => "unavailable",
+            _ when cycle.Readings.Any(r => r.Quality != TelemetryQuality.Good) => "partial",
+            _ => "ok",
+        };
+
+        var p = plc.Value;
+        var m = mqtt.Value;
+        return new MonitorStatus(
+            edge.Value.EdgeId,
+            clock.GetUtcNow(),
+            poll.Value.IntervalMs,
+            cycle?.CompletedUtc,
+            new PlcStatus(p.Host, p.Port, p.Rack, p.Slot, p.TimeoutMs, plcState),
+            new MqttStatus(m.Host, m.Port, mqttConnection.IsConnected),
+            pending,
+            tags);
+    }
+
+    private static Task GuardAsync(HttpContext context, Func<Task> next)
+    {
+        if (!AllowedHosts.Contains(context.Request.Host.Host))
+        {
+            context.Response.StatusCode = StatusCodes.Status400BadRequest;
+            return Task.CompletedTask;
+        }
+
+        var headers = context.Response.Headers;
+        headers.CacheControl = "no-store";
+        headers.XContentTypeOptions = "nosniff";
+        headers.ContentSecurityPolicy =
+            "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'";
+        return next();
+    }
+
+    private static string QualityName(TelemetryQuality quality) => quality switch
+    {
+        TelemetryQuality.Good => "good",
+        TelemetryQuality.Bad => "bad",
+        _ => "uncertain",
+    };
+
+    private static string LoadPage()
+    {
+        using var stream = typeof(MonitorServer).Assembly.GetManifestResourceStream("IndustrialIot.Edge.Monitoring.monitor.html")
+            ?? throw new InvalidOperationException("Embedded monitor page is missing.");
+        using var reader = new StreamReader(stream);
+        return reader.ReadToEnd();
+    }
+}
+
+internal sealed record MonitorStatus(
+    string EdgeId,
+    DateTimeOffset NowUtc,
+    int PollIntervalMs,
+    DateTimeOffset? LastCycleUtc,
+    PlcStatus Plc,
+    MqttStatus Mqtt,
+    long? BufferPending,
+    IReadOnlyList<TagStatus> Tags);
+
+/// <summary><see cref="State"/>: waiting (no cycle yet), ok, partial (some tags bad) or unavailable.</summary>
+internal sealed record PlcStatus(string Host, int Port, int Rack, int Slot, int TimeoutMs, string State);
+
+internal sealed record MqttStatus(string Host, int Port, bool Connected);
+
+internal sealed record TagStatus(
+    string TagId,
+    string Address,
+    string DataType,
+    bool Writable,
+    JsonElement? Value,
+    string? Quality,
+    DateTimeOffset? TimestampUtc,
+    string? Error);

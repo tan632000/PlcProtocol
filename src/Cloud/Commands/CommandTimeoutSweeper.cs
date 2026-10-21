@@ -26,6 +26,11 @@ internal sealed class CommandTimeoutSweeper(
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        if (!options.Value.Enabled)
+        {
+            return; // no commands are sent, so none can time out; rows of an earlier write-mode run are left as they are
+        }
+
         try
         {
             while (!stoppingToken.IsCancellationRequested)

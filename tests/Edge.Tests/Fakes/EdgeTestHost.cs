@@ -157,6 +157,12 @@ internal sealed class EdgeTestHost : IAsyncDisposable
         ["Edge:Mqtt:Password"] = "test-only-password",
         ["Edge:Mqtt:ReconnectMinDelayMs"] = "200",
         ["Edge:Mqtt:ReconnectMaxDelayMs"] = "1000",
+
+        // On, so the command tests model write mode; the production default (off) is proven in CommandsSwitchTests.
+        ["Edge:Commands:Enabled"] = "true",
+
+        // Off unless a test turns it on with a free port: parallel hosts would fight over 5080.
+        ["Edge:Monitor:Enabled"] = "false",
     };
 
     private static int ClosedPort()

@@ -58,7 +58,8 @@ redeploys it; nothing else reaches the server (plan D-02).
 - task-04-ci-workflow.md
 
 ## Verification Plan
-- Command: `MSYS_NO_PATHCONV=1 docker run --rm -v "$(pwd -W):/repo" -w /repo rhysd/actionlint:1.7.7 -no-color .github/workflows/cd.yml .github/workflows/ci.yml && grep -qE '^\s*(- )?uses:' .github/workflows/cd.yml && ! grep -nE '^\s*(- )?uses:' .github/workflows/cd.yml | grep -vE '@[0-9a-f]{40}( |$)|uses: \./\.github/workflows/ci\.yml$' && ! awk '/^[[:space:]]*(- )?run:/{r=1} r&&/\$\{\{/{print FILENAME": "NR": "$0} /^[[:space:]]*(- )?[a-z-]+:/&&!/^[[:space:]]*(- )?run:/{r=0}' .github/workflows/cd.yml | grep -q .`, then the GitHub Actions runs.
+- Command: `MSYS_NO_PATHCONV=1 docker run --rm -v "$(pwd -W):/repo" -w /repo rhysd/actionlint:1.7.7 -no-color .github/workflows/cd.yml .github/workflows/ci.yml && grep -qE '^\s*(- )?uses:' .github/workflows/cd.yml && ! grep -nE '^\s*(- )?uses:' .github/workflows/cd.yml | grep -vE '@[0-9a-f]{40}( |$)|uses: \./\.github/workflows/ci\.yml$' && ! awk '/^[[:space:]]*(- )?run:/{r=1} r&&/\$\{\{/{print FILENAME": "NR": "$0} /^[[:space:]]*(- )?[a-z-]+:/&&!/^[[:space:]]*(- )?run:/{r=0}' .github/workflows/cd.yml | grep -q .`
+- Live: then the GitHub Actions runs.
 - Named probe: actionlint; pin check; injection check (no `${{` inside `run:` blocks); `gh api` settings checks; run jobs
   `guard`, `test`, `image`, `resolve`, `deploy` conclusions; the deploy success line; `docker manifest inspect`; the two
   rejected dispatches.

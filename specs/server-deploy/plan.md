@@ -95,3 +95,5 @@ Specs-Contract: process-first-ready-v1
   mode 600 (umask 077) so the Mosquitto and Cloud containers could not read it — the real server would have failed the
   same way; two test images lacked a digest (SMOKE-00); SMOKE-06 could not see the base image after a BuildKit build. User
   approved fixing all three in task-04 (ownership extended to smoke-test.sh, PostgresFixture.cs, EndToEndTelemetryTests.cs).
+- Implementation (2026-10-21): the `- Command:` lines of task-04 and task-05 carried the live step as trailing prose,
+  which the receipt gate reads as part of the command; the live step moved to its own `- Live:` line, command unchanged.

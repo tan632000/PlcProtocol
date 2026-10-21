@@ -49,7 +49,8 @@ D-01). Replaces `specs/deployments-ci/task-04-ci-github-actions.md`.
 - task-02-compose-image-smoke.md
 
 ## Verification Plan
-- Command: `MSYS_NO_PATHCONV=1 docker run --rm -v "$(pwd -W):/repo" -w /repo rhysd/actionlint:1.7.7 -no-color .github/workflows/ci.yml && grep -qE '^\s*(- )?uses:' .github/workflows/ci.yml && ! grep -nE '^\s*(- )?uses:' .github/workflows/ci.yml | grep -vE '@[0-9a-f]{40}( |$)'`, then the GitHub Actions run of the pull request.
+- Command: `MSYS_NO_PATHCONV=1 docker run --rm -v "$(pwd -W):/repo" -w /repo rhysd/actionlint:1.7.7 -no-color .github/workflows/ci.yml && grep -qE '^\s*(- )?uses:' .github/workflows/ci.yml && ! grep -nE '^\s*(- )?uses:' .github/workflows/ci.yml | grep -vE '@[0-9a-f]{40}( |$)'`
+- Live: then the GitHub Actions run of the pull request.
 - Named probe: actionlint (0 findings); the pin check (at least one `uses:`, none unpinned); run jobs `test` and `smoke`
   conclusion `success`; the skip-check output; TRX entries named above; the smoke log's final line.
 - Reachability: installed — Docker Desktop for actionlint (native path via `pwd -W`); live — repository
@@ -65,12 +66,12 @@ On a failed Step or Verification Plan run: stop; do not widen scope, change the 
 ## Receipt
 
 Verification: PASS
-Command: MSYS_NO_PATHCONV=1 docker run --rm -v "$(pwd -W):/repo" -w /repo rhysd/actionlint:1.7.7 -no-color .github/workflows/ci.yml && grep -qE '^\s*(- )?uses:' .github/workflows/ci.yml && ! grep -nE '^\s*(- )?uses:' .github/workflows/ci.yml | grep -vE '@[0-9a-f]{40}( |$)'`, then the GitHub Actions run of the pull request.
+Command: MSYS_NO_PATHCONV=1 docker run --rm -v "$(pwd -W):/repo" -w /repo rhysd/actionlint:1.7.7 -no-color .github/workflows/ci.yml && grep -qE '^\s*(- )?uses:' .github/workflows/ci.yml && ! grep -nE '^\s*(- )?uses:' .github/workflows/ci.yml | grep -vE '@[0-9a-f]{40}( |$)'
 Exit: 0
-Base: 135fe6f73e8381155f6330842a3ab77e0f7c3137
-Head: b4f0780cceeae4cae30caa4116de11cbc4af7e43af6c33a183a4540fedb6a813
+Base: f985f23f58461cb5364cf96e0815c54fa444d6ec
+Head: f431464792ed6490a6f6beddbd0ea8d48eb477828f480d09deb8c7e40c500a08
 ```text
-$ MSYS_NO_PATHCONV=1 docker run --rm -v "$(pwd -W):/repo" -w /repo rhysd/actionlint:1.7.7 -no-color .github/workflows/ci.yml && grep -qE '^\s*(- )?uses:' .github/workflows/ci.yml && ! grep -nE '^\s*(- )?uses:' .github/workflows/ci.yml | grep -vE '@[0-9a-f]{40}( |$)'`, then the GitHub Actions run of the pull request.
+$ MSYS_NO_PATHCONV=1 docker run --rm -v "$(pwd -W):/repo" -w /repo rhysd/actionlint:1.7.7 -no-color .github/workflows/ci.yml && grep -qE '^\s*(- )?uses:' .github/workflows/ci.yml && ! grep -nE '^\s*(- )?uses:' .github/workflows/ci.yml | grep -vE '@[0-9a-f]{40}( |$)'
 (local command: no findings, exit 0)
 GitHub Actions run 39564072368 (pull request #3, head 135fe6f): https://github.com/tan632000/PlcProtocol/actions/runs/39564072368
 conclusion: success
@@ -96,3 +97,4 @@ TRX: TelemetryStoreTests.Pragmas_AndFileMode outcome=Passed; BrokerTests 13 Pass
 - Counterexamples on disposable copies: a misspelled timeout-minuts failed actionlint; actions/checkout@v7 failed the pin check; the skip-check step exited 1 with no TRX and with one NotExecuted result (also under pipefail), 0 on a clean TRX.
 - Repair rounds: (1) the Command's -color=never flag was invalid (user-approved correction to -no-color); (2) first Linux run: root ca.pem mode 600 unreadable by the Mosquitto/Cloud containers (real server defect), undigested postgres test images, SMOKE-06 base image absent - fixed in cc71431 with user-approved ownership extension; (3) second run: SecretsDirectory cleanup recreated removed folders as root - fixed in 135fe6f.
 - Review: code-auditor PASS for ci.yml and for both repair commits (0 Critical/High/Medium). Open Low: a Linux secret set created before cc71431 needs chmod 644 deployments/.secrets/ca.pem (not documented).
+- Base/Head re-derived at f985f23 after the receipt command line was corrected; the live run was on 135fe6f, and `git diff 135fe6f f985f23 -- .github/workflows/ci.yml deployments tests src` is empty (f985f23 only adds cd.yml and spec state).

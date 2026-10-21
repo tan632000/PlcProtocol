@@ -173,7 +173,8 @@ khoảng 20 Edge. Vượt giới hạn thì broker bỏ bớt tin cho Cloud; d�
 
 1. Broker: cập nhật `acl` + `mosquitto.conf`, `docker compose -f deployments/compose.yaml up -d --force-recreate mosquitto`
    (chế độ ghi: giữ `IIOT_MQTT_ACL=./mosquitto/acl-commands`, xem [Chế độ read-only và cách bật ghi](#chế-độ-read-only-và-cách-bật-ghi)).
-2. Cloud: `docker compose -f deployments/compose.yaml up -d --build cloud`.
+2. Cloud: `docker compose -f deployments/compose.yaml up -d --build cloud` (máy chạy thử). Trên server do CD quản lý,
+   không build tay: làm theo [docs/server-deploy.md](server-deploy.md).
 3. Từng Edge (gói cài mới).
 
 Edge mới chạy với broker còn ACL cũ sẽ **không kết nối được** (broker từ chối subscription `telemetry-acks`) —

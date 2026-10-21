@@ -192,6 +192,8 @@ if docker save -o "$work/image.tar" "${PROJECT}-cloud" && tar --force-local -xf 
   # Layers of the pinned runtime base image (from Microsoft) are skipped by the generic PEM check only: Debian's
   # libgnutls ships an embedded sample key. The exact-match check below still covers every layer.
   base_image="$(grep -E '^FROM ' "$root/deployments/cloud/Dockerfile" | tail -1 | awk '{print $2}')"
+  # A BuildKit build does not keep the base image locally; without it no layer would be recognised as the base's.
+  docker pull --quiet "$base_image" >/dev/null || { echo "  could not pull the base image $base_image"; image_ok=0; }
   base_layers="$(docker image inspect "$base_image" --format '{{range .RootFS.Layers}}{{println .}}{{end}}' 2>/dev/null)"
   while IFS= read -r -d '' blob; do
     if [ "$(head -c2 "$blob" | od -An -tx1 | tr -d ' ')" = "1f8b" ]; then reader=(gzip -dc "$blob"); else reader=(cat "$blob"); fi

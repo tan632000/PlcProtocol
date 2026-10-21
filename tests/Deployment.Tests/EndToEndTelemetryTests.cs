@@ -103,7 +103,7 @@ public sealed class EndToEndTelemetryTests(ITestOutputHelper output)
 
     private static async Task<PostgreSqlContainer> StartPostgresAsync()
     {
-        var container = new PostgreSqlBuilder("postgres:17-alpine").Build();
+        var container = new PostgreSqlBuilder("postgres@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24").Build(); // postgres:17-alpine, as in deployments/compose.yaml
         await container.StartAsync();
         return container;
     }

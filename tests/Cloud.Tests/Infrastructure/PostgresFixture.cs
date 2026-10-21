@@ -9,7 +9,7 @@ namespace IndustrialIot.Cloud.Tests.Infrastructure;
 /// </summary>
 public sealed class PostgresFixture : IAsyncLifetime
 {
-    private readonly PostgreSqlContainer _container = new PostgreSqlBuilder("postgres:17-alpine").Build();
+    private readonly PostgreSqlContainer _container = new PostgreSqlBuilder("postgres@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24").Build(); // postgres:17-alpine, as in deployments/compose.yaml
 
     public Task InitializeAsync() => _container.StartAsync();
 

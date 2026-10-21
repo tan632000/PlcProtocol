@@ -263,6 +263,9 @@ public class BrokerTests(BrokerFixture broker) : IClassFixture<BrokerFixture>
         Assert.Equal("1883 755", Stat(broker.Secrets.File("mosquitto")));
         Assert.Equal("1000 755", Stat(broker.Secrets.File("keycloak")));
         Assert.Equal("1883 644", Stat(broker.Secrets.File("mosquitto/server.pem")));
+
+        // The CA certificate is mounted into the Cloud (uid app) and read by every client: readable by all.
+        Assert.EndsWith(" 644", Stat(broker.Secrets.File("ca.pem")), StringComparison.Ordinal);
     }
 
     private static string Stat(string path)

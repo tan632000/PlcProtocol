@@ -26,7 +26,9 @@ services:
       - "${IIOT_MQTT_PORT:-8883}:8883"
     volumes:
       - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
-      - ./mosquitto/acl:/mosquitto/config/acl:ro
+      # Read-only by default: nobody may send commands. Write mode: IIOT_MQTT_ACL=./mosquitto/acl-commands (shell or
+      # deployments/.env), then recreate mosquitto. See docs/deployment.md, "Chế độ read-only và cách bật ghi".
+      - ${IIOT_MQTT_ACL:-./mosquitto/acl}:/mosquitto/config/acl:ro
       - ${IIOT_SECRETS:-./.secrets}/mosquitto/ca.pem:/mosquitto/config/secrets/ca.pem:ro
       - ${IIOT_SECRETS:-./.secrets}/mosquitto/server.pem:/mosquitto/config/secrets/server.pem:ro
       - ${IIOT_SECRETS:-./.secrets}/mosquitto/server.key:/mosquitto/config/secrets/server.key:ro

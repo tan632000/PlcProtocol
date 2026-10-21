@@ -52,6 +52,9 @@ public sealed class CloudTestHost : WebApplicationFactory<Program>
             ["Cloud:Edges:1:DisplayName"] = "Edge B",
             ["Cloud:Auth:Authority"] = Issuer,
             ["Cloud:Auth:Audience"] = Audience,
+
+            // On, so the command tests model write mode; the production default (off) is proven in CommandsDisabledTests.
+            ["Cloud:Commands:Enabled"] = "true",
         };
 
         // The broker describes itself in Edge keys; the Cloud reads the same values from Cloud:Mqtt.

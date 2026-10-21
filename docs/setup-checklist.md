@@ -122,8 +122,15 @@ PowerShell **Run as administrator**:
 
 - [ ] Thống nhất với khách tag nào được ghi, khoảng giá trị (`Min`/`Max`). Ưu tiên ghi vào **DB/M**, để chương trình
       PLC quyết định xuất ra **Q**. Vùng **I** không bao giờ ghi được.
-- [ ] Sửa `C:\Program Files\IndustrialIot\Edge\appsettings.json` → `"Writable": true` cho đúng tag →
-      `Restart-Service IndustrialIot.Edge`.
+- [ ] Bật đủ **bốn** công tắc ([deployment.md, Chế độ read-only và cách bật ghi](deployment.md#chế-độ-read-only-và-cách-bật-ghi));
+      thiếu một cái là không ghi được:
+  - [ ] Edge: `C:\Program Files\IndustrialIot\Edge\appsettings.json` → `Edge:Commands:Enabled` = `true`
+        (`"Commands": { "Enabled": true }`).
+  - [ ] Edge: cùng file → `"Writable": true` cho đúng tag → `Restart-Service IndustrialIot.Edge`.
+  - [ ] Server: thêm `Cloud__Commands__Enabled=true` vào `deployments/.secrets/cloud.env` →
+        `docker compose -f deployments/compose.yaml up -d --force-recreate cloud`.
+  - [ ] Server: `IIOT_MQTT_ACL=./mosquitto/acl-commands` trong `deployments/.env` (không phải `cloud.env`) →
+        `docker compose -f deployments/compose.yaml up -d --force-recreate mosquitto`.
 - [ ] Gửi một lệnh thử bằng user `operator` (deployment.md mục 4), kiểm tra giá trị trong Watch table, rồi trả về giá
       trị cũ.
 

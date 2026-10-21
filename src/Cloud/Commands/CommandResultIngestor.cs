@@ -22,6 +22,7 @@ internal sealed class CommandResultIngestor(
     IServiceScopeFactory scopes,
     LiveNotifier live,
     IOptions<EdgesOptions> edges,
+    IOptions<CommandOptions> options,
     TimeProvider clock,
     ILogger<CommandResultIngestor> logger) : IHostedService
 {
@@ -30,7 +31,17 @@ internal sealed class CommandResultIngestor(
 
     public Task StartAsync(CancellationToken cancellationToken)
     {
-        connection.RegisterSubscription(TopicFilter, HandleAsync);
+        // With commands off nothing can have been sent, so no result is consumed (and no row ever changes).
+        if (options.Value.Enabled)
+        {
+            connection.RegisterSubscription(TopicFilter, HandleAsync);
+        }
+        else
+        {
+            // A write-mode run may have left the subscription and queued results in the persistent session.
+            connection.RetireSubscription(TopicFilter);
+        }
+
         return Task.CompletedTask;
     }
 

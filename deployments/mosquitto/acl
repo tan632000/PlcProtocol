@@ -1,16 +1,18 @@
-# Topic ACL (plan D-02). Anything not granted here is denied, including #, $SYS/# and $share/...
+# Topic ACL, read-only default: no identity may send a command to an Edge (acl-commands is the write-mode variant).
+# Anything not granted here is denied, including #, $SYS/# and $share/...
 
-# The Cloud: receives every Edge's telemetry and results, and is the only identity that sends commands
-# and telemetry acks (an ack makes the Edge delete buffered samples, so no Edge may write one).
+# The Cloud: receives every Edge's telemetry and results, and is the only identity that sends telemetry acks
+# (an ack makes the Edge delete buffered samples, so no Edge may write one). It has no commands write right here.
 user iiot-cloud
 topic read iiot/+/telemetry
 topic read iiot/+/command-results
-topic write iiot/+/commands
 topic write iiot/+/telemetry-acks
 
 # Every identity, through its username (= edgeId for an Edge): only its own topics.
 # The secrets script never issues an Edge id equal to "iiot-cloud", so no Edge can own the Cloud's.
 pattern write iiot/%u/telemetry
 pattern write iiot/%u/command-results
+# Kept on purpose, so acl differs from acl-commands only by the Cloud's commands write: with nobody allowed
+# to write the topic, nothing ever arrives on it.
 pattern read iiot/%u/commands
 pattern read iiot/%u/telemetry-acks

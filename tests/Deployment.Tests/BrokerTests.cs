@@ -70,109 +70,26 @@ public class BrokerTests(BrokerFixture broker) : IClassFixture<BrokerFixture>
     }
 
     [Fact]
-    public async Task EdgeAcl_OwnTopicsOnly()
+    public async Task ReadOnlyDefault_CommandNeverReachesTheEdge()
     {
-        await using var cloud = await MqttClientHelper.ConnectAsync(broker, Cloud, broker.Password(Cloud));
-        await cloud.SubscribeAsync("iiot/+/telemetry", "iiot/+/command-results");
-        await using var line2 = await MqttClientHelper.ConnectAsync(broker, Line2, broker.Password(Line2));
-        await line2.SubscribeAsync($"iiot/{Line2}/commands");
         await using var line1 = await MqttClientHelper.ConnectAsync(broker, Line1, broker.Password(Line1));
-        await line1.SubscribeAsync($"iiot/{Line1}/commands", $"iiot/{Line2}/commands");
 
-        await line1.PublishAsync($"iiot/{Line1}/telemetry", "own-telemetry");
-        await line1.PublishAsync($"iiot/{Line1}/command-results", "own-result");
-        await line1.PublishAsync($"iiot/{Line2}/telemetry", "foreign-telemetry");
-        await line1.PublishAsync($"iiot/{Line1}/commands", "self-command");
-        await cloud.PublishAsync($"iiot/{Line2}/commands", "command-for-line2");
-
-        await line2.WaitForAsync("command-for-line2");
-        await line1.PublishAsync($"iiot/{Line1}/telemetry", "marker");
-        await cloud.WaitForAsync("marker");
-        await Task.Delay(300);
-
-        Assert.Contains("own-telemetry", cloud.Payloads);
-        Assert.Contains("own-result", cloud.Payloads);
-        Assert.DoesNotContain("foreign-telemetry", cloud.Payloads);
-        Assert.Empty(line1.Payloads); // neither its own "command" nor line2's command
-    }
-
-    [Fact]
-    public async Task EdgeAcl_WildcardSharedSysAndWillDenied()
-    {
+        // An Edge with commands enabled still subscribes cleanly (Mosquitto enforces read rights at delivery).
+        var subscribed = await line1.SubscribeAsync($"iiot/{Line1}/commands");
+        Assert.Equal(MqttClientSubscribeResultCode.GrantedQoS1, Assert.Single(subscribed.Items).ResultCode);
+        await line1.SubscribeAsync($"iiot/{Line1}/telemetry-acks");
         await using var cloud = await MqttClientHelper.ConnectAsync(broker, Cloud, broker.Password(Cloud));
         await cloud.SubscribeAsync("iiot/+/telemetry");
 
-        // A retained message line1 must not be able to read, stored before it subscribes.
-        await using (var line2 = await MqttClientHelper.ConnectAsync(broker, Line2, broker.Password(Line2)))
-        {
-            await line2.PublishAsync($"iiot/{Line2}/telemetry", "retained-line2", retain: true);
-            await cloud.WaitForAsync("retained-line2");
-        }
-
-        try
-        {
-            // Control: a will on the identity's own topic is delivered, so a missing forged will means "denied".
-            await using (var ownWill = await MqttClientHelper.ConnectAsync(broker, Line2, broker.Password(Line2),
-                             configure: o => o.WithWillTopic($"iiot/{Line2}/telemetry").WithWillPayload("own-will")
-                                 .WithWillQualityOfServiceLevel(MqttQualityOfServiceLevel.AtLeastOnce)))
-            {
-                await ownWill.DisconnectWithWillAsync();
-            }
-
-            await cloud.WaitForAsync("own-will");
-
-            await using var line1 = await MqttClientHelper.ConnectAsync(broker, Line1, broker.Password(Line1));
-            await line1.SubscribeAsync("#", "iiot/+/commands", "$share/g/iiot/+/commands", "$SYS/#");
-            await cloud.PublishAsync($"iiot/{Line2}/commands", "command-for-line2");
-
-            // A will aimed at another identity's topic: the broker refuses the connection as not authorized,
-            // or accepts it and never delivers the will. Any other failure is not evidence and fails the probe.
-            try
-            {
-                await using var forged = await MqttClientHelper.ConnectAsync(broker, Line2, broker.Password(Line2),
-                    configure: o => o.WithWillTopic($"iiot/{Line1}/telemetry").WithWillPayload("forged-will")
-                        .WithWillQualityOfServiceLevel(MqttQualityOfServiceLevel.AtLeastOnce));
-                await forged.DisconnectWithWillAsync();
-            }
-            catch (InvalidOperationException ex) when (ex.Message.Contains("NotAuthorized", StringComparison.Ordinal))
-            {
-                // Refused at CONNECT because of the will topic.
-            }
-
-            await line1.PublishAsync($"iiot/{Line1}/telemetry", "marker");
-            await cloud.WaitForAsync("marker");
-            await Task.Delay(1000);
-
-            Assert.Empty(line1.Topics); // nothing through #, +, $share or $SYS — not even retained messages
-            Assert.DoesNotContain("forged-will", cloud.Payloads);
-        }
-        finally
-        {
-            // Remove the retained message even when the probe fails, so it cannot leak into other probes.
-            await using var cleaner = await MqttClientHelper.ConnectAsync(broker, Line2, broker.Password(Line2));
-            await cleaner.PublishAsync($"iiot/{Line2}/telemetry", "", retain: true);
-        }
-    }
-
-    [Fact]
-    public async Task CloudAcl_CommandsOnly()
-    {
-        await using var line1 = await MqttClientHelper.ConnectAsync(broker, Line1, broker.Password(Line1));
-        await line1.SubscribeAsync($"iiot/{Line1}/commands");
-        await using var cloud = await MqttClientHelper.ConnectAsync(broker, Cloud, broker.Password(Cloud));
-        await cloud.SubscribeAsync("iiot/+/telemetry", "iiot/+/command-results");
-
+        // Same connection, in order: had the command been forwarded, it would arrive before the ack.
         await cloud.PublishAsync($"iiot/{Line1}/commands", "command");
-        await line1.WaitForAsync("command");
-
-        // The Cloud cannot pose as an Edge.
-        await cloud.PublishAsync($"iiot/{Line1}/telemetry", "cloud-telemetry");
-        await cloud.PublishAsync($"iiot/{Line1}/command-results", "cloud-result");
-        await line1.PublishAsync($"iiot/{Line1}/telemetry", "marker");
-        await cloud.WaitForAsync("marker");
+        await cloud.PublishAsync($"iiot/{Line1}/telemetry-acks", "ack-marker");
+        await line1.WaitForAsync("ack-marker");
+        await line1.PublishAsync($"iiot/{Line1}/telemetry", "telemetry");
+        await cloud.WaitForAsync("telemetry");
         await Task.Delay(300);
 
-        Assert.Equal(["marker"], cloud.Payloads);
+        Assert.Equal(["ack-marker"], line1.Payloads);
     }
 
     [Fact]
@@ -196,40 +113,6 @@ public class BrokerTests(BrokerFixture broker) : IClassFixture<BrokerFixture>
 
         Assert.Equal(["ack-for-line1", "marker"], line1.Payloads);
         Assert.Empty(line2.Payloads); // another Edge's acks are unreadable, directly or through +
-    }
-
-    [Fact]
-    public async Task PersistentSession_RedeliversUnacked()
-    {
-        await MqttClientHelper.ResetSessionAsync(broker, Line1);
-
-        // Received but not acknowledged: the broker sends it again on the next session.
-        await using (var edge = await MqttClientHelper.ConnectAsync(broker, Line1, broker.Password(Line1), cleanStart: false, acknowledge: false))
-        {
-            await edge.SubscribeAsync($"iiot/{Line1}/commands");
-            await using var cloud = await MqttClientHelper.ConnectAsync(broker, Cloud, broker.Password(Cloud));
-            await cloud.PublishAsync($"iiot/{Line1}/commands", "unacked");
-            await edge.WaitForAsync("unacked");
-        }
-
-        await using (var edge = await MqttClientHelper.ConnectAsync(broker, Line1, broker.Password(Line1), cleanStart: false))
-        {
-            await edge.WaitForAsync("unacked");
-        }
-
-        // Queued while the Edge is offline, across a broker restart (persistence).
-        await using (var cloud = await MqttClientHelper.ConnectAsync(broker, Cloud, broker.Password(Cloud)))
-        {
-            await cloud.PublishAsync($"iiot/{Line1}/commands", "queued-across-restart");
-        }
-
-        await broker.RestartAsync();
-        await using (var edge = await MqttClientHelper.ConnectAsync(broker, Line1, broker.Password(Line1), cleanStart: false))
-        {
-            await edge.WaitForAsync("queued-across-restart");
-        }
-
-        await MqttClientHelper.ResetSessionAsync(broker, Line1);
     }
 
     [Fact]
@@ -395,6 +278,156 @@ public class BrokerTests(BrokerFixture broker) : IClassFixture<BrokerFixture>
         certificate.Extensions.OfType<T>().Single();
 }
 
+/// <summary>
+/// The write-mode ACL (deployments/mosquitto/acl-commands): the probes that need the Cloud to deliver commands.
+/// </summary>
+public class CommandsBrokerTests(CommandsBrokerFixture broker) : IClassFixture<CommandsBrokerFixture>
+{
+    private const string Cloud = "iiot-cloud";
+    private const string Line1 = "line1-edge01";
+    private const string Line2 = "line2-edge01";
+
+    [Fact]
+    public async Task EdgeAcl_OwnTopicsOnly()
+    {
+        await using var cloud = await MqttClientHelper.ConnectAsync(broker, Cloud, broker.Password(Cloud));
+        await cloud.SubscribeAsync("iiot/+/telemetry", "iiot/+/command-results");
+        await using var line2 = await MqttClientHelper.ConnectAsync(broker, Line2, broker.Password(Line2));
+        await line2.SubscribeAsync($"iiot/{Line2}/commands");
+        await using var line1 = await MqttClientHelper.ConnectAsync(broker, Line1, broker.Password(Line1));
+        await line1.SubscribeAsync($"iiot/{Line1}/commands", $"iiot/{Line2}/commands");
+
+        await line1.PublishAsync($"iiot/{Line1}/telemetry", "own-telemetry");
+        await line1.PublishAsync($"iiot/{Line1}/command-results", "own-result");
+        await line1.PublishAsync($"iiot/{Line2}/telemetry", "foreign-telemetry");
+        await line1.PublishAsync($"iiot/{Line1}/commands", "self-command");
+        await cloud.PublishAsync($"iiot/{Line2}/commands", "command-for-line2");
+
+        await line2.WaitForAsync("command-for-line2");
+        await line1.PublishAsync($"iiot/{Line1}/telemetry", "marker");
+        await cloud.WaitForAsync("marker");
+        await Task.Delay(300);
+
+        Assert.Contains("own-telemetry", cloud.Payloads);
+        Assert.Contains("own-result", cloud.Payloads);
+        Assert.DoesNotContain("foreign-telemetry", cloud.Payloads);
+        Assert.Empty(line1.Payloads); // neither its own "command" nor line2's command
+    }
+
+    [Fact]
+    public async Task EdgeAcl_WildcardSharedSysAndWillDenied()
+    {
+        await using var cloud = await MqttClientHelper.ConnectAsync(broker, Cloud, broker.Password(Cloud));
+        await cloud.SubscribeAsync("iiot/+/telemetry");
+
+        // A retained message line1 must not be able to read, stored before it subscribes.
+        await using (var line2 = await MqttClientHelper.ConnectAsync(broker, Line2, broker.Password(Line2)))
+        {
+            await line2.PublishAsync($"iiot/{Line2}/telemetry", "retained-line2", retain: true);
+            await cloud.WaitForAsync("retained-line2");
+        }
+
+        try
+        {
+            // Control: a will on the identity's own topic is delivered, so a missing forged will means "denied".
+            await using (var ownWill = await MqttClientHelper.ConnectAsync(broker, Line2, broker.Password(Line2),
+                             configure: o => o.WithWillTopic($"iiot/{Line2}/telemetry").WithWillPayload("own-will")
+                                 .WithWillQualityOfServiceLevel(MqttQualityOfServiceLevel.AtLeastOnce)))
+            {
+                await ownWill.DisconnectWithWillAsync();
+            }
+
+            await cloud.WaitForAsync("own-will");
+
+            await using var line1 = await MqttClientHelper.ConnectAsync(broker, Line1, broker.Password(Line1));
+            await line1.SubscribeAsync("#", "iiot/+/commands", "$share/g/iiot/+/commands", "$SYS/#");
+            await cloud.PublishAsync($"iiot/{Line2}/commands", "command-for-line2");
+
+            // A will aimed at another identity's topic: the broker refuses the connection as not authorized,
+            // or accepts it and never delivers the will. Any other failure is not evidence and fails the probe.
+            try
+            {
+                await using var forged = await MqttClientHelper.ConnectAsync(broker, Line2, broker.Password(Line2),
+                    configure: o => o.WithWillTopic($"iiot/{Line1}/telemetry").WithWillPayload("forged-will")
+                        .WithWillQualityOfServiceLevel(MqttQualityOfServiceLevel.AtLeastOnce));
+                await forged.DisconnectWithWillAsync();
+            }
+            catch (InvalidOperationException ex) when (ex.Message.Contains("NotAuthorized", StringComparison.Ordinal))
+            {
+                // Refused at CONNECT because of the will topic.
+            }
+
+            await line1.PublishAsync($"iiot/{Line1}/telemetry", "marker");
+            await cloud.WaitForAsync("marker");
+            await Task.Delay(1000);
+
+            Assert.Empty(line1.Topics); // nothing through #, +, $share or $SYS — not even retained messages
+            Assert.DoesNotContain("forged-will", cloud.Payloads);
+        }
+        finally
+        {
+            // Remove the retained message even when the probe fails, so it cannot leak into other probes.
+            await using var cleaner = await MqttClientHelper.ConnectAsync(broker, Line2, broker.Password(Line2));
+            await cleaner.PublishAsync($"iiot/{Line2}/telemetry", "", retain: true);
+        }
+    }
+
+    [Fact]
+    public async Task CloudAcl_CommandsOnly()
+    {
+        await using var line1 = await MqttClientHelper.ConnectAsync(broker, Line1, broker.Password(Line1));
+        await line1.SubscribeAsync($"iiot/{Line1}/commands");
+        await using var cloud = await MqttClientHelper.ConnectAsync(broker, Cloud, broker.Password(Cloud));
+        await cloud.SubscribeAsync("iiot/+/telemetry", "iiot/+/command-results");
+
+        await cloud.PublishAsync($"iiot/{Line1}/commands", "command");
+        await line1.WaitForAsync("command");
+
+        // The Cloud cannot pose as an Edge.
+        await cloud.PublishAsync($"iiot/{Line1}/telemetry", "cloud-telemetry");
+        await cloud.PublishAsync($"iiot/{Line1}/command-results", "cloud-result");
+        await line1.PublishAsync($"iiot/{Line1}/telemetry", "marker");
+        await cloud.WaitForAsync("marker");
+        await Task.Delay(300);
+
+        Assert.Equal(["marker"], cloud.Payloads);
+    }
+
+    [Fact]
+    public async Task PersistentSession_RedeliversUnacked()
+    {
+        await MqttClientHelper.ResetSessionAsync(broker, Line1);
+
+        // Received but not acknowledged: the broker sends it again on the next session.
+        await using (var edge = await MqttClientHelper.ConnectAsync(broker, Line1, broker.Password(Line1), cleanStart: false, acknowledge: false))
+        {
+            await edge.SubscribeAsync($"iiot/{Line1}/commands");
+            await using var cloud = await MqttClientHelper.ConnectAsync(broker, Cloud, broker.Password(Cloud));
+            await cloud.PublishAsync($"iiot/{Line1}/commands", "unacked");
+            await edge.WaitForAsync("unacked");
+        }
+
+        await using (var edge = await MqttClientHelper.ConnectAsync(broker, Line1, broker.Password(Line1), cleanStart: false))
+        {
+            await edge.WaitForAsync("unacked");
+        }
+
+        // Queued while the Edge is offline, across a broker restart (persistence).
+        await using (var cloud = await MqttClientHelper.ConnectAsync(broker, Cloud, broker.Password(Cloud)))
+        {
+            await cloud.PublishAsync($"iiot/{Line1}/commands", "queued-across-restart");
+        }
+
+        await broker.RestartAsync();
+        await using (var edge = await MqttClientHelper.ConnectAsync(broker, Line1, broker.Password(Line1), cleanStart: false))
+        {
+            await edge.WaitForAsync("queued-across-restart");
+        }
+
+        await MqttClientHelper.ResetSessionAsync(broker, Line1);
+    }
+}
+
 /// <summary>Finds the repository root (the folder holding IndustrialIot.sln).</summary>
 internal static class Repo
 {
@@ -511,7 +544,7 @@ public sealed class SecretsDirectory : IDisposable
 }
 
 /// <summary>Mosquitto with the repository's configuration, each secret mounted read-only file by file (as compose does).</summary>
-public sealed class BrokerFixture : IAsyncLifetime, IAsyncDisposable
+public class BrokerFixture : IAsyncLifetime, IAsyncDisposable
 {
     public const string Image = "eclipse-mosquitto@sha256:21421af7b32bf9ce508e9090c8eb13bb81f410ca778dc205506180a6f862d0eb";
 
@@ -521,17 +554,25 @@ public sealed class BrokerFixture : IAsyncLifetime, IAsyncDisposable
             new DockerImage("testcontainers/ryuk@sha256:7c1a8a9a47c780ed0f983770a662f80deb115d95cce3e2daa3d12115b8cd28f0");
 
     private readonly bool _ownsSecrets;
+    private readonly string _aclFile;
     private IContainer _container = null!;
 
     public BrokerFixture()
-        : this(SecretsDirectory.Create("--edge", "line1-edge01", "--edge", "line2-edge01", "--san", "IP:192.168.1.50"), ownsSecrets: true)
+        : this("acl")
     {
     }
 
-    private BrokerFixture(SecretsDirectory secrets, bool ownsSecrets)
+    /// <param name="aclFile">A file in deployments/mosquitto, mounted as the broker's ACL.</param>
+    protected BrokerFixture(string aclFile)
+        : this(SecretsDirectory.Create("--edge", "line1-edge01", "--edge", "line2-edge01", "--san", "IP:192.168.1.50"), ownsSecrets: true, aclFile)
+    {
+    }
+
+    protected BrokerFixture(SecretsDirectory secrets, bool ownsSecrets, string aclFile = "acl")
     {
         Secrets = secrets;
         _ownsSecrets = ownsSecrets;
+        _aclFile = aclFile;
     }
 
     public SecretsDirectory Secrets { get; }
@@ -540,9 +581,9 @@ public sealed class BrokerFixture : IAsyncLifetime, IAsyncDisposable
 
     public string CaPath => Secrets.File("ca.pem");
 
-    public static async Task<BrokerFixture> StartAsync(SecretsDirectory secrets)
+    public static async Task<BrokerFixture> StartAsync(SecretsDirectory secrets, string aclFile = "acl")
     {
-        var broker = new BrokerFixture(secrets, ownsSecrets: false);
+        var broker = new BrokerFixture(secrets, ownsSecrets: false, aclFile);
         await broker.InitializeAsync();
         return broker;
     }
@@ -555,7 +596,7 @@ public sealed class BrokerFixture : IAsyncLifetime, IAsyncDisposable
         _container = new ContainerBuilder(Image)
             .WithPortBinding(8883, assignRandomHostPort: true)
             .WithBindMount(Path.Combine(config, "mosquitto.conf"), "/mosquitto/config/mosquitto.conf", AccessMode.ReadOnly)
-            .WithBindMount(Path.Combine(config, "acl"), "/mosquitto/config/acl", AccessMode.ReadOnly)
+            .WithBindMount(Path.Combine(config, _aclFile), "/mosquitto/config/acl", AccessMode.ReadOnly)
             .WithBindMount(Secrets.File("ca.pem"), "/mosquitto/config/secrets/ca.pem", AccessMode.ReadOnly)
             .WithBindMount(Secrets.File("mosquitto/server.pem"), "/mosquitto/config/secrets/server.pem", AccessMode.ReadOnly)
             .WithBindMount(Secrets.File("mosquitto/server.key"), "/mosquitto/config/secrets/server.key", AccessMode.ReadOnly)
@@ -588,6 +629,15 @@ public sealed class BrokerFixture : IAsyncLifetime, IAsyncDisposable
     }
 
     async ValueTask IAsyncDisposable.DisposeAsync() => await DisposeAsync();
+}
+
+/// <summary>The same broker with the write-mode ACL.</summary>
+public sealed class CommandsBrokerFixture : BrokerFixture
+{
+    public CommandsBrokerFixture()
+        : base("acl-commands")
+    {
+    }
 }
 
 /// <summary>An MQTT 5 client configured like the Edge and the Cloud: TLS trusting only the dev CA, QoS 1.</summary>
@@ -663,7 +713,7 @@ public sealed class MqttClientHelper : IAsyncDisposable
         await using var reset = await ConnectAsync(broker, identity, broker.Password(identity), cleanStart: true);
     }
 
-    public async Task SubscribeAsync(params string[] filters)
+    public async Task<MqttClientSubscribeResult> SubscribeAsync(params string[] filters)
     {
         var options = new MqttClientSubscribeOptionsBuilder();
         foreach (var filter in filters)
@@ -671,8 +721,8 @@ public sealed class MqttClientHelper : IAsyncDisposable
             options.WithTopicFilter(f => f.WithTopic(filter).WithAtLeastOnceQoS());
         }
 
-        // A refused filter (SUBACK error) is a valid outcome for the denial probes.
-        await _client.SubscribeAsync(options.Build());
+        // A refused filter (SUBACK error) is a valid outcome for the denial probes; callers that care read the result.
+        return await _client.SubscribeAsync(options.Build());
     }
 
     /// <summary>QoS 1; a denied publish (failed PUBACK or a closed connection) is not an error here.</summary>

@@ -200,8 +200,9 @@ Khai báo PLC và tag trong `src/Edge/appsettings.json` (lần đầu để mọ
 5. Trên máy Edge mở trình duyệt vào **http://localhost:5080/** (trang **PLC Monitor** của phần mềm Edge, xem
    `docs/deployment.md`) và so cột **Giá trị** với cột **Monitor value** của TIA. Phía Cloud: API `/tags/latest`.
 
-Khi đã đọc đúng, mới đổi tag cần ghi (ví dụ `Line1.Setpoint`) sang `"Writable": true` và thử lệnh ghi từ Cloud;
-giá trị mới phải hiện trong watch table.
+Mặc định hệ thống chỉ đọc. Chỉ khi khách cần ghi, và sau khi đã đọc đúng, mới bật đủ bốn công tắc (trong đó có
+`"Writable": true` cho tag cần ghi, ví dụ `Line1.Setpoint`) theo `docs/deployment.md`, mục
+"Chế độ read-only và cách bật ghi"; giá trị ghi xuống phải hiện trong watch table.
 
 Lưu ý: TIA đang **online** với PLC cũng chiếm một connection slot. Edge vẫn kết nối được song song, nhưng
 nên đóng các kết nối online thừa (**Go offline**) khi không cần.

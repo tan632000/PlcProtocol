@@ -54,6 +54,8 @@ public static class EdgeServiceCollectionExtensions
         services.AddHostedService(provider => provider.GetRequiredService<MqttConnection>());
         services.AddHostedService<TelemetryPublisher>();
 
+        // Off by default (read-only Edge); the listener checks it at start, so the same gate holds in every host.
+        services.AddOptions<CommandsOptions>().Bind(configuration.GetSection(CommandsOptions.SectionName)).ValidateOnStart();
         services.TryAddSingleton<CommandLog>();
         services.TryAddSingleton<CommandExecutor>();
         services.AddHostedService<CommandListener>();

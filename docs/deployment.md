@@ -67,13 +67,14 @@ docker compose -f deployments/compose.yaml down -v                   # dừng v�
 
 ## 4. Lấy token và gọi API
 
-Hai user mẫu: `viewer` (đọc) và `operator` (đọc + gửi lệnh). Mật khẩu nằm trong
+Hai user mẫu: `viewer` (đọc) và `operator` (đọc + gửi lệnh khi đã bật chế độ ghi). Mật khẩu nằm trong
 `deployments/.secrets/passwords/` (`viewer.txt`, `operator.txt`; mật khẩu admin Keycloak là `keycloak-admin.txt`).
 
 ```bash
 TOKEN=$(bash deployments/scripts/get-token.sh viewer)
 curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8080/api/v1/edges
 
+# Chỉ ở chế độ ghi (mục "Chế độ read-only và cách bật ghi"); mặc định API trả 404.
 OP=$(bash deployments/scripts/get-token.sh operator)
 curl -X POST -H "Authorization: Bearer $OP" -H "Content-Type: application/json" \
   -d '{"tagId":"Line1.Setpoint","value":1200}' \
@@ -84,8 +85,40 @@ curl -X POST -H "Authorization: Bearer $OP" -H "Content-Type: application/json" 
 `https://keycloak:8443/realms/iiot` — đúng địa chỉ Cloud dùng để kiểm tra. Lấy token bằng trình duyệt hay gọi
 thẳng `https://127.0.0.1:8443` sẽ ra token Cloud không chấp nhận.
 
-> ⚠️ Lệnh POST ở trên **ghi thật xuống PLC** nếu Edge `line1-edge01` đang chạy và tag đó được khai báo ghi được.
-> Lần đầu hãy cấu hình Edge chỉ đọc (xem `docs/plc-setup.md`).
+> ⚠️ Mặc định hệ thống **chỉ đọc**: lệnh POST ở trên trả `404`. Khi đã bật đủ bốn công tắc ghi (mục dưới), lệnh
+> này **ghi thật xuống PLC** nếu Edge `line1-edge01` đang chạy và tag đó là `"Writable": true`.
+
+### Chế độ read-only và cách bật ghi
+
+Mặc định Cloud/web SCADA **chỉ hiển thị**, không ghi xuống PLC. Một lệnh ghi chỉ tới được PLC khi **cả bốn** công
+tắc đều bật; tắt bất kỳ cái nào là chặn ghi. Mỗi thay đổi cần khởi động lại thành phần tương ứng.
+
+| # | Công tắc | Đặt ở đâu | Áp dụng |
+|---|---|---|---|
+| 1 | Edge `Edge:Commands:Enabled` = `true` | `C:\Program Files\IndustrialIot\Edge\appsettings.json`, mục `"Edge"` → `"Commands": { "Enabled": true }` | `Restart-Service IndustrialIot.Edge` |
+| 2 | Cloud `Cloud__Commands__Enabled=true` | thêm dòng vào `deployments/.secrets/cloud.env` | `docker compose -f deployments/compose.yaml up -d --force-recreate cloud` |
+| 3 | Broker `IIOT_MQTT_ACL=./mosquitto/acl-commands` | nên dùng dòng trong `deployments/.env` (compose đọc file này để thay biến); biến shell cũng được nhưng phải có ở **mọi** lệnh compose sau đó, thiếu là broker quay về ACL read-only. **Không** đặt trong `cloud.env`: `env_file` chỉ đưa biến vào container, không dùng để thay biến trong `compose.yaml` | `docker compose -f deployments/compose.yaml up -d --force-recreate mosquitto` |
+| 4 | Tag `"Writable": true` (kèm `Min`/`Max` nếu cần) | `appsettings.json` của Edge, từng tag | `Restart-Service IndustrialIot.Edge` |
+
+Kiểm tra ACL đang dùng: `docker compose -f deployments/compose.yaml config | grep acl` (dòng `source:` phải kết thúc
+bằng `acl-commands`).
+
+**Cài lại Edge làm mất công tắc 1 và 4:** gỡ cài đặt chỉ giữ file cũ dưới dạng
+`C:\ProgramData\IndustrialIot\Edge\appsettings.backup.json` (`uninstall-edge.ps1 -RemoveData` xoá cả bản này), và
+bộ cài ghi lại `appsettings.json` mặc định (chỉ đọc). Sau khi cài lại, chép phần `Commands`/`Tags` từ bản backup
+sang, hoặc đặt lại công tắc, rồi `Restart-Service IndustrialIot.Edge`.
+
+| Lệch cấu hình | Triệu chứng | Cách sửa |
+|---|---|---|
+| Cloud bật + ACL read-only | POST trả `503` (`publish_unconfirmed`), Cloud log `Broker answered a publish on ... with NotAuthorized`; lệnh ở `publish_unknown` rồi sau hạn thành `timed_out` | Đặt `IIOT_MQTT_ACL=./mosquitto/acl-commands`, `--force-recreate mosquitto` |
+| Edge tắt + Cloud bật (ACL ghi) | Lệnh có trạng thái `timed_out` (Edge không nhận lệnh) | Bật `Edge:Commands:Enabled`, `Restart-Service IndustrialIot.Edge` |
+| Edge bật + ACL read-only | Edge vẫn kết nối và subscribe bình thường, nhưng **không lệnh nào tới** (không có log lỗi) | Đổi ACL như dòng đầu |
+| Cloud tắt | API lệnh trả `404` | Bật `Cloud__Commands__Enabled=true`, `up -d --force-recreate cloud` |
+
+**Nâng cấp từ bản cũ (đang ghi được):** sau khi nâng cấp, việc ghi dừng hẳn cho tới khi đặt đủ bốn công tắc. Muốn
+chuyển từ ghi sang chỉ đọc thì tắt khi **không còn lệnh nào đang chờ** (không lệnh nào còn ở trạng thái `pending`/`published`/`publish_unknown`);
+lệnh còn kẹt trong hàng đợi MQTT sẽ bị Edge/Cloud xác nhận và bỏ đi (log `Discarded a message on retired topic`),
+không thực thi.
 
 ## 5. Mở cổng 8883 cho Edge (Windows + Docker Desktop)
 
@@ -138,7 +171,8 @@ khoảng 20 Edge. Vượt giới hạn thì broker bỏ bớt tin cho Cloud; d�
 
 #### Thứ tự nâng cấp
 
-1. Broker: cập nhật `acl` + `mosquitto.conf`, `docker compose -f deployments/compose.yaml up -d --force-recreate mosquitto`.
+1. Broker: cập nhật `acl` + `mosquitto.conf`, `docker compose -f deployments/compose.yaml up -d --force-recreate mosquitto`
+   (chế độ ghi: giữ `IIOT_MQTT_ACL=./mosquitto/acl-commands`, xem [Chế độ read-only và cách bật ghi](#chế-độ-read-only-và-cách-bật-ghi)).
 2. Cloud: `docker compose -f deployments/compose.yaml up -d --build cloud`.
 3. Từng Edge (gói cài mới).
 
@@ -156,7 +190,7 @@ Stack này đánh đổi bảo mật để dựng nhanh. Chỉ dùng trên **m�
   `docker inspect`.
 - Docker publish cổng **vượt qua rule firewall của host trên Linux** (iptables của Docker); cổng 8883 mở cho cả
   mạng LAN. Broker vẫn bắt buộc TLS + mật khẩu + ACL theo danh tính: mỗi Edge chỉ đọc/ghi được topic của chính
-  nó, chỉ Cloud được gửi lệnh.
+  nó; với ACL mặc định không ai gửi được lệnh, với `acl-commands` chỉ Cloud được gửi.
 - Trên Windows, quyền file trong `deployments/.secrets` chỉ được bảo vệ bởi quyền thư mục người dùng (NTFS); trên
   Linux, key và file mật khẩu thuộc riêng uid của container (0600).
 

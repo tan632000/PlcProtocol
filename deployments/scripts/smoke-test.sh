@@ -156,20 +156,15 @@ else
 fi
 
 command='{"tagId":"Smoke.Never","value":1}'
-# --- SMOKE-04: a Viewer cannot command. ---
+# --- SMOKE-04: read-only default, the command API does not exist for a Viewer. ---
 code="$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $viewer" -H 'Content-Type: application/json' \
   -d "$command" "$API/api/v1/edges/smoke-edge/commands")"
-[ "$code" = "403" ] && pass SMOKE-04 "viewer POST -> 403" || fail SMOKE-04 "viewer POST -> $code (expected 403)"
+[ "$code" = "404" ] && pass SMOKE-04 "viewer POST -> 404 (read-only default)" || fail SMOKE-04 "viewer POST -> $code (expected 404)"
 
-# --- SMOKE-05: an Operator's command is published (to an Edge that does not exist anywhere). ---
-body="$(curl -s -w '\n%{http_code}' -X POST -H "Authorization: Bearer $operator" -H 'Content-Type: application/json' \
+# --- SMOKE-05: read-only default, nor for an Operator (Cloud:Commands:Enabled is off). ---
+code="$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $operator" -H 'Content-Type: application/json' \
   -d "$command" "$API/api/v1/edges/smoke-edge/commands")"
-code="${body##*$'\n'}"
-if [ "$code" = "202" ] && [[ "$body" == *'"status":"published"'* ]]; then
-  pass SMOKE-05 "operator POST -> 202 published"
-else
-  fail SMOKE-05 "operator POST -> $code"
-fi
+[ "$code" = "404" ] && pass SMOKE-05 "operator POST -> 404 (read-only default)" || fail SMOKE-05 "operator POST -> $code (expected 404)"
 
 # --- SMOKE-06: no private key or password in any layer of the Cloud image. ---
 image_ok=1

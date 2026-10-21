@@ -28,6 +28,9 @@ D-01). Replaces `specs/deployments-ci/task-04-ci-github-actions.md`.
 - Modify: `specs/deployments-ci/task-04-ci-github-actions.md` (Status → `blocked`, Blocker: superseded by
   `specs/server-deploy/task-04-ci-workflow.md`)
 - Conditional modify: see Scope.
+- Modify (user-approved after the first Linux run, 2026-10-21): `tests/Cloud.Tests/Infrastructure/PostgresFixture.cs`,
+  `tests/Deployment.Tests/EndToEndTelemetryTests.cs` (pin the postgres test image by digest, SMOKE-00),
+  `deployments/scripts/smoke-test.sh` (pull the pinned base image before SMOKE-06 skips its layers).
 - Read: `global.json`, `IndustrialIot.sln`, `deployments/scripts/smoke-test.sh`
 
 ## Steps

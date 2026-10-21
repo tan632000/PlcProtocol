@@ -91,3 +91,7 @@ Specs-Contract: process-first-ready-v1
   runtime evidence.
 - Implementation (2026-10-21): task-04 was blocked because its Command used `-color=never`, which actionlint 1.7.7 rejects
   (`invalid boolean value "never" for -color`); user approved replacing it with `-no-color` in task-04 and task-05 only.
+- Implementation (2026-10-21): the first CI run on Linux failed (15 Deployment.Tests, 7 smoke checks): the root `ca.pem` was
+  mode 600 (umask 077) so the Mosquitto and Cloud containers could not read it — the real server would have failed the
+  same way; two test images lacked a digest (SMOKE-00); SMOKE-06 could not see the base image after a BuildKit build. User
+  approved fixing all three in task-04 (ownership extended to smoke-test.sh, PostgresFixture.cs, EndToEndTelemetryTests.cs).

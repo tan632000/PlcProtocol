@@ -536,6 +536,13 @@ public sealed class SecretsDirectory : IDisposable
             // Only those folders are mounted (ca.key never enters a container); the rest belongs to the test user.
             foreach (var service in Directory.GetDirectories(Path, "*", SearchOption.AllDirectories))
             {
+                // Emptying a parent already removed its subfolders; mounting a missing path would make Docker
+                // recreate it as root, which the test user could then not delete.
+                if (!Directory.Exists(service))
+                {
+                    continue;
+                }
+
                 using var cleanup = Process.Start("docker", ["run", "--rm", "--user", "0", "--entrypoint", "sh", "-v", $"{service}:/work",
                     BrokerFixture.Image, "-c", "rm -rf /work/* /work/.[!.]* 2>/dev/null; true"])!;
                 cleanup.WaitForExit();

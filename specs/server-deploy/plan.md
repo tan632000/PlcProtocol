@@ -70,8 +70,8 @@ Specs-Contract: process-first-ready-v1
 | 01 | Server deploy script | P1 | AC-01, AC-02, AC-03 | `deployments/scripts/remote-deploy.sh`, `tests/Deployment.Tests/RemoteDeployTests.cs`, `.gitignore` | - | done |
 | 02 | Compose image switch and smoke compatibility | P1 | AC-04 | `deployments/compose.yaml`, `deployments/scripts/smoke-test.sh`, `docs/deployment.md` | - | done |
 | 03 | AWS server and GitHub runbook | P1 | AC-05 | `docs/server-deploy.md` | - | done |
-| 04 | CI workflow on pull requests to main | P1 | AC-06 | `.github/workflows/ci.yml`, `specs/deployments-ci/task-04-ci-github-actions.md`, conditional Linux-only test fixes | task-01-remote-deploy-script.md, task-02-compose-image-smoke.md | in_progress |
-| 05 | CD workflow from main to the AWS server | P1 | AC-07 | `.github/workflows/cd.yml` | task-01-remote-deploy-script.md, task-02-compose-image-smoke.md, task-03-server-runbook.md, task-04-ci-workflow.md | pending |
+| 04 | CI workflow on pull requests to main | P1 | AC-06 | `.github/workflows/ci.yml`, `specs/deployments-ci/task-04-ci-github-actions.md`, conditional Linux-only test fixes | task-01-remote-deploy-script.md, task-02-compose-image-smoke.md | done |
+| 05 | CD workflow from main to the AWS server | P1 | AC-07 | `.github/workflows/cd.yml` | task-01-remote-deploy-script.md, task-02-compose-image-smoke.md, task-03-server-runbook.md, task-04-ci-workflow.md | blocked |
 
 ## Review log
 - Round 1 (2026-10-21, three fresh reviewers: facts/assumptions, security, failure modes/scope): 28 raw findings →

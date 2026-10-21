@@ -1,6 +1,7 @@
 # Task 05 — Only a tested push to main, or a rollback dispatch, deploys the Cloud
 
-Status: pending
+Status: blocked
+Blocker: live level unavailable — needs the owner (tan632000) to complete docs/server-deploy.md §1–§5 (branch protection, environment `production` with reviewer and DEPLOY_* environment secrets, EC2 + Elastic IP, deploy user, forced-command key, secrets) and then merge pull request #3. Local level passed (actionlint, pin and injection checks; counterexamples fail on copies); code-auditor PASS.
 
 ## Outcome
 `.github/workflows/cd.yml` tests every push to `main`, publishes `ghcr.io/tan632000/plcprotocol/cloud:<sha>`, and deploys
@@ -8,7 +9,8 @@ its digest through the server's forced command; a dispatch on `main` with the `s
 redeploys it; nothing else reaches the server (plan D-02).
 
 ## Scope
-- In: triggers `push` → `main`, `workflow_dispatch` (input `sha`, optional); top-level `permissions: contents: read`; jobs:
+- In: triggers `push` → `main`, `workflow_dispatch` (input `sha`, required — a dispatch only redeploys a given commit;
+  amended in implementation review); top-level `permissions: contents: read`; jobs:
   - `guard`: fails unless `github.ref == 'refs/heads/main'`; for a dispatch, validates `INPUT_SHA` (passed via `env:`)
     against `^[0-9a-f]{40}$` in bash; outputs `sha` (the pushed `github.sha` or the input) and `mode` (`tip`/`rollback`).
   - `test` (push only): `uses: ./.github/workflows/ci.yml`.

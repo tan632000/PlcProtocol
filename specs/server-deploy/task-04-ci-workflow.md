@@ -1,6 +1,6 @@
 # Task 04 — Every pull request to main runs the whole suite and the smoke test on Linux
 
-Status: in_progress
+Status: done
 
 ## Outcome
 `.github/workflows/ci.yml` builds and tests the solution and runs the smoke test on `ubuntu-latest` for pull requests to
@@ -63,3 +63,36 @@ D-01). Replaces `specs/deployments-ci/task-04-ci-github-actions.md`.
 On a failed Step or Verification Plan run: stop; do not widen scope, change the Command, or weaken a test; record observed versus expected; repair only the cited cause; after three failed rounds, stop and ask the user. Without the owner's push and pull request the task stays `blocked` with that cause.
 
 ## Receipt
+
+Verification: PASS
+Command: MSYS_NO_PATHCONV=1 docker run --rm -v "$(pwd -W):/repo" -w /repo rhysd/actionlint:1.7.7 -no-color .github/workflows/ci.yml && grep -qE '^\s*(- )?uses:' .github/workflows/ci.yml && ! grep -nE '^\s*(- )?uses:' .github/workflows/ci.yml | grep -vE '@[0-9a-f]{40}( |$)'`, then the GitHub Actions run of the pull request.
+Exit: 0
+Base: 135fe6f73e8381155f6330842a3ab77e0f7c3137
+Head: b4f0780cceeae4cae30caa4116de11cbc4af7e43af6c33a183a4540fedb6a813
+```text
+$ MSYS_NO_PATHCONV=1 docker run --rm -v "$(pwd -W):/repo" -w /repo rhysd/actionlint:1.7.7 -no-color .github/workflows/ci.yml && grep -qE '^\s*(- )?uses:' .github/workflows/ci.yml && ! grep -nE '^\s*(- )?uses:' .github/workflows/ci.yml | grep -vE '@[0-9a-f]{40}( |$)'`, then the GitHub Actions run of the pull request.
+(local command: no findings, exit 0)
+GitHub Actions run 39564072368 (pull request #3, head 135fe6f): https://github.com/tan632000/PlcProtocol/actions/runs/39564072368
+conclusion: success
+job test: success
+job smoke: success
+Passed!  - Failed:     0, Passed:    55, Skipped:     0, Total:    55, Duration: 487 ms - Shared.Tests.dll (net10.0)
+Passed!  - Failed:     0, Passed:   304, Skipped:     0, Total:   304, Duration: 43 s - Edge.Tests.dll (net10.0)
+Passed!  - Failed:     0, Passed:   118, Skipped:     0, Total:   118, Duration: 2 m 43 s - Cloud.Tests.dll (net10.0)
+Passed!  - Failed:     0, Passed:    32, Skipped:     0, Total:    32, Duration: 3 m 12 s - Deployment.Tests.dll (net10.0)
+4 TRX file(s), 0 not executed
+PASS SMOKE-00 static: per-file secret mounts, no ca.key, digests everywhere, .dockerignore, no password on argv
+PASS SMOKE-01 /health/ready 200
+PASS SMOKE-02 no token -> 401
+PASS SMOKE-03 viewer token -> 200 with smoke-edge (labelled smoke-edge)
+PASS SMOKE-04 viewer POST -> 404 (read-only default)
+PASS SMOKE-05 operator POST -> 404 (read-only default)
+PASS SMOKE-06 no private key or generated secret in any image layer
+PASS SMOKE-07 repository tree unchanged
+Smoke test passed.
+TRX: TelemetryStoreTests.Pragmas_AndFileMode outcome=Passed; BrokerTests 13 Passed, 0 other
+```
+- Live: run 39564072368 on pull request #3 green; artifact test-results downloaded and checked (4 TRX, Pragmas_AndFileMode Passed, 13 BrokerTests Passed).
+- Counterexamples on disposable copies: a misspelled timeout-minuts failed actionlint; actions/checkout@v7 failed the pin check; the skip-check step exited 1 with no TRX and with one NotExecuted result (also under pipefail), 0 on a clean TRX.
+- Repair rounds: (1) the Command's -color=never flag was invalid (user-approved correction to -no-color); (2) first Linux run: root ca.pem mode 600 unreadable by the Mosquitto/Cloud containers (real server defect), undigested postgres test images, SMOKE-06 base image absent - fixed in cc71431 with user-approved ownership extension; (3) second run: SecretsDirectory cleanup recreated removed folders as root - fixed in 135fe6f.
+- Review: code-auditor PASS for ci.yml and for both repair commits (0 Critical/High/Medium). Open Low: a Linux secret set created before cc71431 needs chmod 644 deployments/.secrets/ca.pem (not documented).

@@ -1,0 +1,137 @@
+name: CD
+
+# A push to main is tested, published as ghcr.io/tan632000/plcprotocol/cloud:<sha> and, once a reviewer approves the
+# `production` environment, deployed by digest through the server's forced SSH command (remote-deploy.sh). A manual
+# run with `sha` redeploys an earlier CD-built commit (rollback, or resuming after a manual upgrade).
+# See docs/server-deploy.md. Inputs reach shell steps only through `env:`, never as `${{ }}` inside a script.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: Commit on main to redeploy (40 hex characters); its image must have been built by CD
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      sha: ${{ steps.check.outputs.sha }}
+      mode: ${{ steps.check.outputs.mode }}
+    steps:
+      - id: check
+        env:
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          PUSHED_SHA: ${{ github.sha }}
+          INPUT_SHA: ${{ inputs.sha }}
+        run: |
+          [ "$REF" = refs/heads/main ] || { echo "CD runs only from main, not $REF"; exit 1; }
+          if [ "$EVENT" = workflow_dispatch ]; then
+            [[ "$INPUT_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "sha must be 40 lowercase hex characters"; exit 1; }
+            echo "sha=$INPUT_SHA" >> "$GITHUB_OUTPUT"
+            echo "mode=rollback" >> "$GITHUB_OUTPUT"
+          else
+            echo "sha=$PUSHED_SHA" >> "$GITHUB_OUTPUT"
+            echo "mode=tip" >> "$GITHUB_OUTPUT"
+          fi
+
+  test:
+    needs: guard
+    if: github.event_name == 'push'
+    uses: ./.github/workflows/ci.yml
+
+  image:
+    needs: [guard, test]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.ref.outputs.image }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        env:
+          DOCKER_BUILD_RECORD_UPLOAD: false # the repository is public; build records are not needed
+        with:
+          context: .
+          file: deployments/cloud/Dockerfile
+          push: true
+          provenance: false
+          tags: ghcr.io/tan632000/plcprotocol/cloud:${{ needs.guard.outputs.sha }}
+      - id: ref
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "unexpected image digest '$DIGEST'"; exit 1; }
+          echo "image=ghcr.io/tan632000/plcprotocol/cloud@$DIGEST" >> "$GITHUB_OUTPUT"
+
+  # A rollback deploys the image CD already built for that commit; the package is public, so no login is needed.
+  resolve:
+    needs: guard
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      image: ${{ steps.ref.outputs.image }}
+    steps:
+      - id: ref
+        env:
+          SHA: ${{ needs.guard.outputs.sha }}
+        run: |
+          digest="$(docker buildx imagetools inspect "ghcr.io/tan632000/plcprotocol/cloud:$SHA" --format '{{json .Manifest}}' | jq -r .digest)"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "no CD-built image for $SHA"; exit 1; }
+          echo "image=ghcr.io/tan632000/plcprotocol/cloud@$digest" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    needs: [guard, test, image, resolve]
+    if: ${{ !cancelled() && needs.guard.result == 'success' && ((needs.test.result == 'success' && needs.image.result == 'success') || (needs.resolve.result == 'success' && needs.test.result == 'skipped' && needs.image.result == 'skipped')) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production
+    permissions: {} # the deploy needs only its environment secrets
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+    steps:
+      # The server's authorized_keys runs only remote-deploy.sh for this key; the three words below become its input.
+      - name: Deploy over SSH
+        env:
+          SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+          SHA: ${{ needs.guard.outputs.sha }}
+          IMAGE: ${{ needs.image.outputs.image || needs.resolve.outputs.image }}
+          MODE: ${{ needs.guard.outputs.mode }}
+        run: |
+          set -euo pipefail
+          umask 077
+          key="$RUNNER_TEMP/deploy_key"
+          hosts="$RUNNER_TEMP/deploy_known_hosts"
+          trap 'rm -f "$key" "$hosts"' EXIT
+          # Values pasted on Windows may carry CR characters, which ssh rejects.
+          printf '%s\n' "$SSH_KEY" | tr -d '\r' > "$key"
+          printf '%s\n' "$KNOWN_HOSTS" | tr -d '\r' > "$hosts"
+          ssh -i "$key" -o IdentitiesOnly=yes -o BatchMode=yes \
+            -o UserKnownHostsFile="$hosts" -o StrictHostKeyChecking=yes \
+            -p "${DEPLOY_PORT:-22}" "$DEPLOY_USER@$DEPLOY_HOST" "$SHA $IMAGE $MODE"

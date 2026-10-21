@@ -14,6 +14,8 @@ export IIOT_RESTART=no
 
 HELPER_IMAGE="eclipse-mosquitto@sha256:21421af7b32bf9ce508e9090c8eb13bb81f410ca778dc205506180a6f862d0eb"
 PROJECT="iiot-smoke"
+# The Cloud image this stack builds: its own name, never the trial stack's or a deployed one.
+export IIOT_CLOUD_IMAGE="${PROJECT}-cloud"
 API="http://127.0.0.1:8080"
 
 host_path() {
@@ -82,9 +84,13 @@ while IFS= read -r line; do
     || static_fail "secrets mount is not a single read-only file: $line"
 done < <(grep -v '^\s*#' "$compose_file" | grep -E '^\s*-' | grep -E 'secrets|IIOT_SECRETS')
 grep -v '^\s*#' "$compose_file" | grep -qE '^\s*(source|target):' && static_fail "long-syntax mounts are not allowed (cannot be checked)"
+# The one exemption: the Cloud line names the locally built image (or a digest chosen by CD).
+[ "$(grep -cxF '    image: ${IIOT_CLOUD_IMAGE:-iiot-cloud:local}' "$compose_file")" = 1 ] \
+  || static_fail "the Cloud image exemption must appear exactly once"
 while IFS= read -r line; do
   [[ "$line" == *@sha256:* ]] || static_fail "image without digest: $line"
-done < <(grep -hE '^\s*image:' "$compose_file"; grep -hE '^FROM ' "$root"/deployments/cloud/Dockerfile)
+done < <(grep -hE '^\s*image:' "$compose_file" | grep -vxF '    image: ${IIOT_CLOUD_IMAGE:-iiot-cloud:local}'
+         grep -hE '^FROM ' "$root"/deployments/cloud/Dockerfile)
 while IFS= read -r line; do
   [[ "$line" == *@sha256:* ]] || static_fail "script image without digest: $line"
 done < <(grep -hE '^[A-Z_]*IMAGE=' "$root"/deployments/scripts/*.sh)

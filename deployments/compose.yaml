@@ -70,6 +70,9 @@ services:
     restart: ${IIOT_RESTART:-unless-stopped}
 
   cloud:
+    # On a CD-managed server remote-deploy.sh sets IIOT_CLOUD_IMAGE to a GHCR digest and tags it iiot-cloud:local, so
+    # manual commands there run the last deployed image; elsewhere this is the tag of the local build below.
+    image: ${IIOT_CLOUD_IMAGE:-iiot-cloud:local}
     build:
       context: ..
       dockerfile: deployments/cloud/Dockerfile

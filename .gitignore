@@ -28,3 +28,8 @@ src/Edge/data/
 
 # Visual Studio per-user state (locked while VS is open)
 .vs/
+
+# Server state written by remote-deploy.sh (backups and failure logs) and compose interpolation values
+deployments/.env
+deployments/.backups/
+deployments/.deploy-logs/

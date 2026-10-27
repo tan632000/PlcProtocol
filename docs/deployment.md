@@ -105,8 +105,11 @@ bằng `acl-commands`).
 
 **Cài lại Edge làm mất công tắc 1 và 4:** gỡ cài đặt chỉ giữ file cũ dưới dạng
 `C:\ProgramData\IndustrialIot\Edge\appsettings.backup.json` (`uninstall-edge.ps1 -RemoveData` xoá cả bản này), và
-bộ cài ghi lại `appsettings.json` mặc định (chỉ đọc). Sau khi cài lại, chép phần `Commands`/`Tags` từ bản backup
-sang, hoặc đặt lại công tắc, rồi `Restart-Service IndustrialIot.Edge`.
+bộ cài ghi lại `appsettings.json` mặc định (chỉ đọc). Sau khi cài lại, chép phần `Edge:Plc` (toàn bộ: `Protocol`,
+`Port`, `CpuType`, `Rack`, `Slot`, `TimeoutMs`…) cùng phần `Commands`/`Tags` từ bản backup sang, hoặc đặt lại công
+tắc, rồi `Restart-Service IndustrialIot.Edge`. Riêng `Host`: `install-edge.ps1` ghi `Edge__Plc__Host` vào biến môi
+trường của service, và biến này **đè** `Host` trong `appsettings.json`; muốn đổi IP PLC thì chạy lại script với
+`-PlcHost`, đừng chỉ sửa file.
 
 | Lệch cấu hình | Triệu chứng | Cách sửa |
 |---|---|---|
@@ -279,8 +282,10 @@ powershell -ExecutionPolicy Bypass -File "C:\Program Files\IndustrialIot\Edge\un
 powershell -ExecutionPolicy Bypass -File "C:\Program Files\IndustrialIot\Edge\uninstall-edge.ps1" -RemoveData  # xoá cả buffer
 ```
 
-Danh sách tag được giữ lại ở `C:\ProgramData\IndustrialIot\Edge\appsettings.backup.json`. Sau khi cài lại, chép
-file này đè lên `C:\Program Files\IndustrialIot\Edge\appsettings.json` rồi `Restart-Service IndustrialIot.Edge`.
+Cấu hình cũ (gồm phần `Edge:Plc` và danh sách tag) được giữ lại ở
+`C:\ProgramData\IndustrialIot\Edge\appsettings.backup.json`. Sau khi cài lại, chép file này đè lên
+`C:\Program Files\IndustrialIot\Edge\appsettings.json` rồi `Restart-Service IndustrialIot.Edge`. Lưu ý
+`install-edge.ps1` ghi `Edge__Plc__Host` vào biến môi trường của service, biến này đè `Host` trong `appsettings.json`.
 
 Nếu script cài báo một thư mục `IndustrialIot` "not owned by Administrators or SYSTEM", có người đã tạo sẵn thư
 mục đó: kiểm tra nội dung, xoá nó (hoặc `takeown /f <thư mục> /a /r`) rồi cài lại. Script cố ý từ chối, vì chủ

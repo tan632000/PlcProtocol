@@ -255,7 +255,11 @@ Khai báo trong cấu hình Edge (section `Edge:Plc`):
 | `Port` | 102 | 1..65535 |
 | `Rack` | 0 | 0..7 |
 | `Slot` | 1 | 0..15 |
+| `CpuType` | `S71200` | `S71200` hoặc `S71500` |
 | `TimeoutMs` | 3000 | 100..60000 — tổng thời gian một thao tác (chờ lượt + kết nối + đọc/ghi) |
+
+S7-1200 là mặc định. Với S7-1500 đặt `"CpuType": "S71500"` (S7-1500 dùng Rack 0 / Slot 1 trong cấu hình Edge)
+`[UNVERIFIED — chưa có máy S7-1500 để thử]`.
 
 Giá trị ngoài giới hạn làm Edge **dừng ngay khi khởi động**, không chờ tới lần gọi PLC đầu tiên.
 
@@ -299,3 +303,75 @@ Sau mọi lỗi kết nối, lần gọi tiếp theo tự mở kết nối mới
 - S7netplus 0.20.0 chỉ đóng socket khi nó còn ở trạng thái "connected"; sau lỗi connect hoặc peer reset,
   socket cũ chờ GC thu hồi. Khi PLC mất kết nối lâu, tầng gọi driver nên retry có backoff thay vì gọi dồn dập.
 - Chưa hỗ trợ kiểu `String`, `DTL`, `LReal`.
+
+## 8. Mitsubishi FX5U (SLMP)
+
+Với PLC Mitsubishi FX5U, đặt `"Protocol": "Slmp"` trong `Edge:Plc`: Edge đọc qua giao thức **SLMP** (khung 3E,
+dữ liệu nhị phân, TCP). Giao thức mặc định vẫn là `S7`. Edge **không bao giờ ghi** vào PLC qua SLMP; cấu hình
+`Edge:Commands:Enabled = true` cùng `Protocol = Slmp` làm Edge dừng ngay khi khởi động. PLC Monitor
+(`http://localhost:5080/`) hiện giao thức, IP và cổng (Rack/Slot chỉ hiện với S7).
+
+### 8.1. Cấu hình trong GX Works3
+
+> [UNVERIFIED — tên và vị trí các mục menu bên dưới (Module Parameter → Ethernet Port, External Device Configuration,
+> Alive Check, Communication Data Code, việc phải reset sau khi ghi parameter) chưa được đối chiếu trên GX Works3 thật;
+> sẽ kiểm khi chạy thử với FX5U (task-07 của specs/plc-multi-protocol) và sửa lại nếu khác.]
+
+Vào **Navigation** → **Parameter** → **FX5UCPU** → **Module Parameter** → **Ethernet Port**:
+
+1. **Basic Settings** → **Own Node Settings**: đặt IP của PLC (ví dụ `192.168.3.250`) và subnet mask.
+2. **External Device Configuration** → **Detailed Settings** → kéo **SLMP Connection Module** vào bảng, rồi đặt:
+   - **Protocol**: `TCP`.
+   - **Port No.** (cổng của PLC): ví dụ `5000`. Không dùng `102` (cổng S7; Edge từ chối `Port` 102 cho Slmp);
+     `Port` trong cấu hình Edge phải đúng bằng giá trị này.
+   - **Partner IP / Destination IP**: IP của máy Edge (ví dụ `192.168.3.100`).
+   - **Alive Check**: bật (**Enabled**) để PLC giải phóng kết nối cũ khi Edge chết giữa chừng.
+3. **Communication Data Code**: **Binary**. Nếu chọn ASCII, Edge nhận khung ASCII và báo lỗi subheader.
+4. **IP Filter Settings**: chỉ cho phép IP của máy Edge. SLMP không có xác thực, ai tới được cổng này đều đọc được
+   PLC.
+5. **Online Change**: chọn **Disable All (SLMP)** để SLMP không thể ghi/đổi dữ liệu từ xa.
+6. **Write** parameter xuống PLC rồi **reset hoặc cấp nguồn lại** (thông số Ethernet chỉ có hiệu lực sau đó).
+
+Tác dụng chính xác của từng lớp bảo vệ (IP Filter chặn kết nối từ IP khác ở mức nào, **Disable All (SLMP)** chặn
+những lệnh nào, Alive Check đóng kết nối sau bao lâu) `[UNVERIFIED — kiểm trên PLC bench theo FX5 communication
+manual]`. Edge chỉ gửi lệnh đọc nên cấu hình trên không ảnh hưởng việc đọc.
+
+### 8.2. Kết nối và địa chỉ
+
+- **Một Edge cho mỗi kết nối SLMP.** Khi thử từ laptop, tắt các client khác (GX Works3 monitor, Edge khác) và service
+  `IndustrialIot.Edge` đã cài, nếu không các kết nối tranh nhau slot của PLC.
+- Kiểm tra mạng: `Test-NetConnection 192.168.3.250 -Port 5000` → `TcpTestSucceeded : True`.
+- `TimeoutMs` hợp lệ: 1000..60000 (mặc định 3000). `Port` là bắt buộc.
+
+| Địa chỉ | Ý nghĩa | `DataType` |
+|---|---|---|
+| `D<n>` | Thanh ghi dữ liệu, `n` thập phân (ví dụ `D0`, `D100`) | `Int`, `Word`, `DInt`, `DWord`, `Real` |
+| `M<n>` | Relay nội bộ, `n` thập phân (ví dụ `M10`) | `Bool` |
+| `X<n>` | Ngõ vào, `n` **bát phân** đúng như GX Works3 hiện | `Bool` |
+| `Y<n>` | Ngõ ra, `n` **bát phân** đúng như GX Works3 hiện | `Bool` |
+
+- Kiểu 2 word (`DInt`, `DWord`, `Real`) chiếm `D<n>` và `D<n+1>`, **word thấp trước** (little-endian): ví dụ `Real`
+  tại `D10` dùng `D10` (word thấp) và `D11` (word cao).
+- `X`/`Y` theo bát phân: `X17` là ngõ vào thứ 16 (`X0`–`X7`, `X10`–`X17`); `X8` và `X9` **không tồn tại**.
+- Tag SLMP luôn chỉ đọc; không dùng `"Writable": true`.
+
+### 8.3. Cấu hình Edge
+
+```json
+{
+  "Edge": {
+    "Plc": { "Protocol": "Slmp", "Host": "192.168.3.250", "Port": 5000, "TimeoutMs": 3000 },
+    "Commands": { "Enabled": false },
+    "Tags": [
+      { "TagId": "Line1.Speed",       "Address": "D0",   "DataType": "Int",  "Writable": false },
+      { "TagId": "Line1.Temperature", "Address": "D10",  "DataType": "Real", "Writable": false },
+      { "TagId": "Line1.Running",     "Address": "M0",   "DataType": "Bool", "Writable": false },
+      { "TagId": "Line1.Start",       "Address": "X17",  "DataType": "Bool", "Writable": false },
+      { "TagId": "Line1.Motor",       "Address": "Y10",  "DataType": "Bool", "Writable": false }
+    ]
+  }
+}
+```
+
+Giới hạn: driver SLMP mới được kiểm thử với PLC giả lập trên loopback (`FakeSlmpServer`), **chưa** thử trên FX5U
+thật `[UNVERIFIED — kiểm trên PLC bench]`.

@@ -47,6 +47,8 @@ Máy Edge và máy Server **có thể là cùng một máy** (bản nhỏ). Khô
 - [ ] CPU → Protection & Security → **Permit access with PUT/GET** bật.
 - [ ] Mọi DB Edge cần đọc/ghi: **tắt Optimized block access**, compile, ghi lại cột **Offset**.
 - [ ] Compile + download (hoặc chỉ download phần thay đổi), CPU ở **RUN**.
+- [ ] PLC Mitsubishi FX5U thay vì S7: làm theo [plc-setup.md mục "Mitsubishi FX5U (SLMP)"](plc-setup.md); chọn giao thức
+      `Protocol` (`S7` / `Slmp`) và đặt `Edge:Plc` (`Port` lấy từ GX Works3, không dùng 102; Edge không ghi được vào SLMP).
 - [ ] Lập bảng tag: địa chỉ không có dấu `%` (`DB1.DBW2`, `I0.0`, `IW64`, `M10.0`…), kiểu dữ liệu, mặc định **chỉ đọc**.
 
 ## Giai đoạn 2 — Mạng → [plc-setup.md mục 0.2, mục 4](plc-setup.md)

@@ -294,10 +294,13 @@ public sealed class EndToEndTelemetryTests(ITestOutputHelper output)
     {
         private int _reads;
 
-        public Task<object> ReadAsync(PlcAddress address, PlcDataType type, CancellationToken ct) =>
-            Task.FromResult<object>((short)(Interlocked.Increment(ref _reads) % short.MaxValue));
+        public Task<IReadOnlyList<PlcReadResult>> ReadAsync(IReadOnlyList<ResolvedTag> tags, CancellationToken ct) =>
+            SequentialBatchReader.ReadAsync(
+                tags,
+                (_, _) => Task.FromResult<object>((short)(Interlocked.Increment(ref _reads) % short.MaxValue)),
+                ct);
 
-        public Task WriteAsync(PlcAddress address, PlcDataType type, object value, CancellationToken ct) => Task.CompletedTask;
+        public Task WriteAsync(IPlcAddress address, PlcDataType type, object value, CancellationToken ct) => Task.CompletedTask;
 
         public Task<bool> IsReachableAsync(CancellationToken ct) => Task.FromResult(true);
     }

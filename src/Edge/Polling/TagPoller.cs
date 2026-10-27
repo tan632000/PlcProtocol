@@ -74,51 +74,49 @@ internal sealed class TagPoller(
         var plcUnavailable = false;
         var unexpectedLogged = false;
 
-        foreach (var tag in catalog.Tags)
+        var results = await ReadAllAsync(ct).ConfigureAwait(false);
+
+        for (var i = 0; i < catalog.Tags.Count; i++)
         {
-            if (plcUnavailable)
+            var tag = catalog.Tags[i];
+            switch (results[i])
             {
-                samples.Add(Bad(tag));
-                errors.Add($"Not read: {unavailableReason}");
-                continue;
-            }
+                case { Error: null }:
+                    var sample = ToSample(tag, results[i].Value);
+                    samples.Add(sample);
+                    errors.Add(sample.Quality == TelemetryQuality.Good ? null : "Value is not a finite number.");
+                    break;
 
-            try
-            {
-                var value = await driver.ReadAsync(tag.Address, tag.DataType, ct).ConfigureAwait(false);
-                var sample = ToSample(tag, value);
-                samples.Add(sample);
-                errors.Add(sample.Quality == TelemetryQuality.Good ? null : "Value is not a finite number.");
-            }
-            catch (PlcUnavailableException ex)
-            {
-                // Includes PlcBusyException. The other tags would only wait for the same timeout.
-                logger.LogWarning("PLC unavailable while reading {TagId}: {Message}", tag.TagId, ex.Message);
-                plcUnavailable = true;
-                unavailableReason = ex.Message;
-                samples.Add(Bad(tag));
-                errors.Add(ex.Message);
-            }
-            catch (Exception ex) when (ex is PlcAccessDeniedException or PlcValueException)
-            {
-                logger.LogWarning("Reading {TagId} failed: {Message}", tag.TagId, ex.Message);
-                samples.Add(Bad(tag));
-                errors.Add(ex.Message);
-            }
-            catch (OperationCanceledException) when (ct.IsCancellationRequested)
-            {
-                throw;
-            }
-            catch (Exception ex)
-            {
-                if (!unexpectedLogged)
-                {
-                    logger.LogError(ex, "Unexpected error while reading {TagId}.", tag.TagId);
-                    unexpectedLogged = true;
-                }
+                case { Error: PlcUnavailableException } when plcUnavailable:
+                    // Includes PlcBusyException. The driver skipped the other tags; they would only wait for the same timeout.
+                    samples.Add(Bad(tag));
+                    errors.Add($"Not read: {unavailableReason}");
+                    break;
 
-                samples.Add(Bad(tag));
-                errors.Add("Unexpected error; see the Edge log.");
+                case { Error: PlcUnavailableException ex }:
+                    logger.LogWarning("PLC unavailable while reading {TagId}: {Message}", tag.TagId, ex.Message);
+                    plcUnavailable = true;
+                    unavailableReason = ex.Message;
+                    samples.Add(Bad(tag));
+                    errors.Add(ex.Message);
+                    break;
+
+                case { Error: PlcAccessDeniedException or PlcValueException } failed:
+                    logger.LogWarning("Reading {TagId} failed: {Message}", tag.TagId, failed.Error.Message);
+                    samples.Add(Bad(tag));
+                    errors.Add(failed.Error.Message);
+                    break;
+
+                default:
+                    if (!unexpectedLogged)
+                    {
+                        logger.LogError(results[i].Error, "Unexpected error while reading {TagId}.", tag.TagId);
+                        unexpectedLogged = true;
+                    }
+
+                    samples.Add(Bad(tag));
+                    errors.Add("Unexpected error; see the Edge log.");
+                    break;
             }
         }
 
@@ -145,7 +143,38 @@ internal sealed class TagPoller(
         return plcUnavailable;
     }
 
-    private TelemetrySample ToSample(ResolvedTag tag, object value)
+    /// <summary>
+    /// One batch read. A driver that throws or returns the wrong number of results must not stop the host:
+    /// every tag then gets the same unexpected-error result, which the cycle logs once.
+    /// </summary>
+    private async Task<IReadOnlyList<PlcReadResult>> ReadAllAsync(CancellationToken ct)
+    {
+        Exception failure;
+        try
+        {
+            var results = await driver.ReadAsync(catalog.Tags, ct).ConfigureAwait(false);
+            if (results.Count == catalog.Tags.Count)
+            {
+                return results;
+            }
+
+            failure = new InvalidOperationException(
+                $"The driver returned {results.Count} results for {catalog.Tags.Count} tags.");
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            // Wrapped so that even a PLC exception from the batch call itself is reported as unexpected.
+            failure = new InvalidOperationException("The driver's batch read failed.", ex);
+        }
+
+        return [.. catalog.Tags.Select(_ => PlcReadResult.Fail(failure))];
+    }
+
+    private TelemetrySample ToSample(ResolvedTag tag, object? value)
     {
         var now = clock.GetUtcNow();
 

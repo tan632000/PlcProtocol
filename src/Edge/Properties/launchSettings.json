@@ -16,6 +16,15 @@
         "Edge__Mqtt__Password": "not-a-secret-no-broker"
       }
     },
+    "FX5U test (no broker)": {
+      "commandName": "Project",
+      "commandLineArgs": "--contentRoot lab/fx5u",
+      "environmentVariables": {
+        "DOTNET_ENVIRONMENT": "Development",
+        "Edge__Mqtt__Host": "no-broker.invalid",
+        "Edge__Mqtt__Password": "not-a-secret-no-broker"
+      }
+    },
     "IndustrialIot.Edge": {
       "commandName": "Project",
       "environmentVariables": {

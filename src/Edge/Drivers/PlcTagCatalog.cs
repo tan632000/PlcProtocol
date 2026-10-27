@@ -15,7 +15,7 @@ public sealed class PlcTagCatalogOptions
 /// <summary>A catalog tag whose address has been parsed and checked against its data type.</summary>
 public sealed record ResolvedTag(
     string TagId,
-    PlcAddress Address,
+    IPlcAddress Address,
     PlcDataType DataType,
     bool Writable,
     decimal? Min,
@@ -42,13 +42,19 @@ public sealed partial class PlcTagCatalog
     private readonly Dictionary<string, ResolvedTag> _tags = new(StringComparer.OrdinalIgnoreCase);
 
     public PlcTagCatalog(PlcTagCatalogOptions options)
+        : this(options, new S7AddressSyntax())
+    {
+    }
+
+    public PlcTagCatalog(PlcTagCatalogOptions options, IPlcAddressSyntax syntax)
     {
         ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(syntax);
 
         var ordered = new List<ResolvedTag>();
         foreach (var definition in options.Tags ?? [])
         {
-            var tag = Resolve(definition);
+            var tag = Resolve(definition, syntax);
             if (!_tags.TryAdd(tag.TagId, tag))
             {
                 throw new InvalidOperationException($"Tag catalog: duplicate tagId '{tag.TagId}' (ids are case-insensitive).");
@@ -78,7 +84,7 @@ public sealed partial class PlcTagCatalog
             return WriteDecision.Deny(CommandReasons.UnknownTag);
         }
 
-        if (tag.Address.Area == PlcArea.Input)
+        if (tag.Address.ReadOnlyReason is not null)
         {
             return WriteDecision.Deny(CommandReasons.InputAreaNotWritable, tag);
         }
@@ -123,7 +129,7 @@ public sealed partial class PlcTagCatalog
             && (tag.Max is not { } upper || number <= upper);
     }
 
-    private static ResolvedTag Resolve(PlcTagDefinition? definition)
+    private static ResolvedTag Resolve(PlcTagDefinition? definition, IPlcAddressSyntax syntax)
     {
         if (definition is null)
         {
@@ -135,20 +141,19 @@ public sealed partial class PlcTagCatalog
             throw Invalid(definition, "tagId must be 1..64 chars [A-Za-z0-9_.-]");
         }
 
-        PlcAddress address;
+        IPlcAddress address;
         try
         {
-            address = PlcAddressParser.Parse(definition.Address);
-            PlcValueConverter.EnsureCompatible(address, definition.DataType);
+            address = syntax.Parse(definition.Address, definition.DataType);
         }
         catch (PlcException ex)
         {
             throw Invalid(definition, ex.Message, ex);
         }
 
-        if (definition.Writable && address.Area == PlcArea.Input)
+        if (definition.Writable && address.ReadOnlyReason is { } readOnlyReason)
         {
-            throw Invalid(definition, "input area (I) tags cannot be writable");
+            throw Invalid(definition, readOnlyReason);
         }
 
         ValidateBounds(definition);
@@ -191,9 +196,26 @@ public sealed partial class PlcTagCatalog
         var tags = _tags.Values.ToArray();
         foreach (var writable in tags.Where(t => t.Writable))
         {
+            if (writable.Address is not PlcAddress writableAddress)
+            {
+                throw new InvalidOperationException(
+                    $"Tag catalog: writable tag '{writable.TagId}' has a non-S7 address; the overlap check only supports S7 addresses.");
+            }
+
             foreach (var other in tags)
             {
-                if (!ReferenceEquals(writable, other) && Overlaps(writable.Address, other.Address))
+                if (ReferenceEquals(writable, other))
+                {
+                    continue;
+                }
+
+                if (other.Address is not PlcAddress otherAddress)
+                {
+                    throw new InvalidOperationException(
+                        $"Tag catalog: tag '{other.TagId}' has a non-S7 address; the overlap check only supports S7 addresses.");
+                }
+
+                if (Overlaps(writableAddress, otherAddress))
                 {
                     throw new InvalidOperationException(
                         $"Tag catalog: writable tag '{writable.TagId}' ({writable.Address}) overlaps tag '{other.TagId}' ({other.Address}).");

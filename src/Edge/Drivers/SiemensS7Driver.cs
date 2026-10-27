@@ -37,16 +37,28 @@ public sealed class SiemensS7Driver : IPlcDriver, IAsyncDisposable
 
     private TimeSpan DefaultTimeout => TimeSpan.FromMilliseconds(_options.TimeoutMs);
 
-    public Task<object> ReadAsync(PlcAddress address, PlcDataType type, CancellationToken ct) =>
+    /// <summary>One read per tag, each taking the lock on its own so writes can interleave between tags.</summary>
+    public Task<IReadOnlyList<PlcReadResult>> ReadAsync(IReadOnlyList<ResolvedTag> tags, CancellationToken ct) =>
+        SequentialBatchReader.ReadAsync(tags, (tag, token) => ReadAsync(tag.Address, tag.DataType, token), ct);
+
+    public Task<object> ReadAsync(IPlcAddress address, PlcDataType type, CancellationToken ct) =>
         ReadAsync(address, type, DefaultTimeout, ct);
 
-    public Task WriteAsync(PlcAddress address, PlcDataType type, object value, CancellationToken ct) =>
+    public Task WriteAsync(IPlcAddress address, PlcDataType type, object value, CancellationToken ct) =>
         WriteAsync(address, type, value, DefaultTimeout, ct);
 
-    /// <summary>Overload with an explicit budget so tests can make one caller give up sooner than another.</summary>
-    internal async Task<object> ReadAsync(PlcAddress address, PlcDataType type, TimeSpan timeout, CancellationToken ct)
+    /// <summary>Rejects an address that belongs to another protocol, before any I/O.</summary>
+    private static PlcAddress RequireS7(IPlcAddress address)
     {
         ArgumentNullException.ThrowIfNull(address);
+        return address as PlcAddress
+            ?? throw new PlcAccessDeniedException($"Address '{address.Canonical}' is not an S7 address.");
+    }
+
+    /// <summary>Overload with an explicit budget so tests can make one caller give up sooner than another.</summary>
+    internal async Task<object> ReadAsync(IPlcAddress plcAddress, PlcDataType type, TimeSpan timeout, CancellationToken ct)
+    {
+        var address = RequireS7(plcAddress);
         PlcValueConverter.EnsureCompatible(address, type);
 
         using var budget = new CancellationTokenSource(timeout);
@@ -88,9 +100,9 @@ public sealed class SiemensS7Driver : IPlcDriver, IAsyncDisposable
     }
 
     /// <summary>Overload with an explicit budget so tests can make one caller give up sooner than another.</summary>
-    internal async Task WriteAsync(PlcAddress address, PlcDataType type, object value, TimeSpan timeout, CancellationToken ct)
+    internal async Task WriteAsync(IPlcAddress plcAddress, PlcDataType type, object value, TimeSpan timeout, CancellationToken ct)
     {
-        ArgumentNullException.ThrowIfNull(address);
+        var address = RequireS7(plcAddress);
         PlcValueConverter.EnsureCompatible(address, type);
         var bytes = PlcValueConverter.ToBytes(type, value);
 
@@ -217,6 +229,21 @@ public sealed class SiemensS7Driver : IPlcDriver, IAsyncDisposable
         _lock.Release();
     }
 
+    /// <summary>Builds the unopened S7netplus client for the configured CPU type (no network I/O).</summary>
+    internal S7Net.Plc CreatePlc()
+    {
+        if (!SiemensS7Options.TryParseCpuType(_options.CpuType, out var cpuType))
+        {
+            throw new InvalidOperationException($"{SiemensS7Options.SectionName}:CpuType must be S71200 or S71500 (was '{_options.CpuType}').");
+        }
+
+        return new S7Net.Plc(cpuType, _options.Host, _options.Port, (short)_options.Rack, (short)_options.Slot)
+        {
+            ReadTimeout = _options.TimeoutMs,
+            WriteTimeout = _options.TimeoutMs,
+        };
+    }
+
     /// <summary>Returns the open connection or opens a new one. Caller must hold the lock.</summary>
     private async Task<S7Net.Plc> ConnectAsync(CancellationToken operationToken, CancellationToken callerToken)
     {
@@ -226,11 +253,7 @@ public sealed class SiemensS7Driver : IPlcDriver, IAsyncDisposable
         }
 
         Discard();
-        var plc = new S7Net.Plc(S7Net.CpuType.S71200, _options.Host, _options.Port, (short)_options.Rack, (short)_options.Slot)
-        {
-            ReadTimeout = _options.TimeoutMs,
-            WriteTimeout = _options.TimeoutMs,
-        };
+        var plc = CreatePlc();
 
         // Stored before opening so a disposal or discard can still close a handshake that hangs.
         _plc = plc;

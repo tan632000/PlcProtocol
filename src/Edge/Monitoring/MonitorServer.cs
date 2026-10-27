@@ -1,6 +1,7 @@
 using System.Text.Json;
 using IndustrialIot.Edge.Buffering;
 using IndustrialIot.Edge.Drivers;
+using IndustrialIot.Edge.Drivers.Slmp;
 using IndustrialIot.Edge.Messaging;
 using IndustrialIot.Edge.Polling;
 using IndustrialIot.Shared.Common;
@@ -20,7 +21,9 @@ namespace IndustrialIot.Edge.Monitoring;
 internal sealed class MonitorServer(
     IOptions<MonitorOptions> options,
     IOptions<EdgeOptions> edge,
-    IOptions<SiemensS7Options> plc,
+    IOptions<PlcProtocolOptions> protocol,
+    IOptions<SiemensS7Options> s7,
+    IOptions<SlmpOptions> slmp,
     IOptions<MqttOptions> mqtt,
     IOptions<PollOptions> poll,
     PlcTagCatalog catalog,
@@ -125,14 +128,18 @@ internal sealed class MonitorServer(
             _ => "ok",
         };
 
-        var p = plc.Value;
+        // Only the selected protocol's options are validated and meaningful; read just those.
+        PlcProtocolOptions.TryParse(protocol.Value.Protocol, out var selected);
+        var plcStatus = selected == PlcProtocol.Slmp
+            ? new PlcStatus(nameof(PlcProtocol.Slmp), slmp.Value.Host, slmp.Value.Port, null, null, slmp.Value.TimeoutMs, plcState)
+            : new PlcStatus(nameof(PlcProtocol.S7), s7.Value.Host, s7.Value.Port, s7.Value.Rack, s7.Value.Slot, s7.Value.TimeoutMs, plcState);
         var m = mqtt.Value;
         return new MonitorStatus(
             edge.Value.EdgeId,
             clock.GetUtcNow(),
             poll.Value.IntervalMs,
             cycle?.CompletedUtc,
-            new PlcStatus(p.Host, p.Port, p.Rack, p.Slot, p.TimeoutMs, plcState),
+            plcStatus,
             new MqttStatus(m.Host, m.Port, mqttConnection.IsConnected),
             pending,
             tags);
@@ -180,8 +187,11 @@ internal sealed record MonitorStatus(
     long? BufferPending,
     IReadOnlyList<TagStatus> Tags);
 
-/// <summary><see cref="State"/>: waiting (no cycle yet), ok, partial (some tags bad) or unavailable.</summary>
-internal sealed record PlcStatus(string Host, int Port, int Rack, int Slot, int TimeoutMs, string State);
+/// <summary>
+/// <see cref="Protocol"/>: S7 or Slmp; <see cref="Rack"/>/<see cref="Slot"/> are null for Slmp.
+/// <see cref="State"/>: waiting (no cycle yet), ok, partial (some tags bad) or unavailable.
+/// </summary>
+internal sealed record PlcStatus(string Protocol, string Host, int Port, int? Rack, int? Slot, int TimeoutMs, string State);
 
 internal sealed record MqttStatus(string Host, int Port, bool Connected);
 

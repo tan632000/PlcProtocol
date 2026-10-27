@@ -63,6 +63,55 @@ public class MonitorTests
     }
 
     [Fact]
+    public async Task Status_S7ShowsProtocolPortRackAndSlot()
+    {
+        var port = FreePort();
+        await using var edge = await StartAsync(new FakePlcDriver(), port, plcOverrides: new Dictionary<string, string?>
+        {
+            ["Edge:Plc:Port"] = "102",
+            ["Edge:Plc:Rack"] = "0",
+            ["Edge:Plc:Slot"] = "1",
+        });
+        using var http = Client(port);
+
+        var status = await WaitForStatusAsync(http, _ => true);
+
+        var plc = status.GetProperty("plc");
+        Assert.Equal("S7", plc.GetProperty("protocol").GetString());
+        Assert.Equal(102, plc.GetProperty("port").GetInt32());
+        Assert.Equal(0, plc.GetProperty("rack").GetInt32());
+        Assert.Equal(1, plc.GetProperty("slot").GetInt32());
+    }
+
+    [Fact]
+    public async Task Status_SlmpShowsProtocolAndPortWithoutRackAndSlot()
+    {
+        var port = FreePort();
+        await using var edge = await StartAsync(new FakePlcDriver(), port, plcOverrides: new Dictionary<string, string?>
+        {
+            ["Edge:Plc:Protocol"] = "Slmp",
+            ["Edge:Plc:Port"] = "5000",
+            ["Edge:Plc:TimeoutMs"] = "1000",
+            ["Edge:Commands:Enabled"] = "false",
+            ["Edge:Tags:0:Address"] = "D0",
+            ["Edge:Tags:1:Address"] = "D1",
+            ["Edge:Tags:2:Address"] = "D2",
+            ["Edge:Tags:0:DataType"] = "Word",
+            ["Edge:Tags:1:DataType"] = "Word",
+            ["Edge:Tags:2:DataType"] = "Word",
+        });
+        using var http = Client(port);
+
+        var status = await WaitForStatusAsync(http, _ => true);
+
+        var plc = status.GetProperty("plc");
+        Assert.Equal("Slmp", plc.GetProperty("protocol").GetString());
+        Assert.Equal(5000, plc.GetProperty("port").GetInt32());
+        Assert.Equal(JsonValueKind.Null, plc.GetProperty("rack").ValueKind);
+        Assert.Equal(JsonValueKind.Null, plc.GetProperty("slot").ValueKind);
+    }
+
+    [Fact]
     public async Task Page_IsServed()
     {
         var port = FreePort();
@@ -129,7 +178,7 @@ public class MonitorTests
         Assert.Contains("Edge:Monitor:Port", ex.Message, StringComparison.Ordinal);
     }
 
-    private static async Task<EdgeTestHost> StartAsync(FakePlcDriver driver, int port, bool enabled = true)
+    private static async Task<EdgeTestHost> StartAsync(FakePlcDriver driver, int port, bool enabled = true, Dictionary<string, string?>? plcOverrides = null)
     {
         var overrides = new Dictionary<string, string?>
         {
@@ -141,6 +190,11 @@ public class MonitorTests
             overrides[$"Edge:Tags:{i}:TagId"] = ThreeTags[i].TagId;
             overrides[$"Edge:Tags:{i}:Address"] = ThreeTags[i].Address;
             overrides[$"Edge:Tags:{i}:DataType"] = ThreeTags[i].Type;
+        }
+
+        foreach (var (key, value) in plcOverrides ?? [])
+        {
+            overrides[key] = value;
         }
 
         var edge = EdgeTestHost.Create(overrides, services => services.AddSingleton<IPlcDriver>(driver), runAgentServices: true);

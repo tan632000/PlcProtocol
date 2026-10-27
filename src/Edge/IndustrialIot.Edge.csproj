@@ -22,6 +22,11 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- Lab settings for live PLC checks (VS profile "FX5U test"); never shipped to customers. -->
+    <Content Update="lab\**" CopyToOutputDirectory="Never" CopyToPublishDirectory="Never" />
+  </ItemGroup>
+
+  <ItemGroup>
     <InternalsVisibleTo Include="Edge.Tests" />
   </ItemGroup>
 

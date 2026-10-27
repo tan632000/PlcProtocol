@@ -22,20 +22,8 @@ public static class PlcValueConverter
     };
 
     /// <summary>Throws <see cref="PlcValueException"/> when the address size cannot hold the type.</summary>
-    public static void EnsureCompatible(PlcAddress address, PlcDataType type)
-    {
-        ArgumentNullException.ThrowIfNull(address);
-
-        var size = SizeOf(type);
-        var compatible = type == PlcDataType.Bool
-            ? address.IsBit
-            : !address.IsBit && address.SizeBytes == size;
-
-        if (!compatible)
-        {
-            throw new PlcValueException($"Address '{address}' cannot hold a {type} value.");
-        }
-    }
+    public static void EnsureCompatible(PlcAddress address, PlcDataType type) =>
+        S7AddressSyntax.EnsureCompatible(address, type);
 
     /// <summary>
     /// Turns a JSON command value into the CLR value for <paramref name="type"/>, rejecting the wrong

@@ -27,7 +27,10 @@ public class CommandFlowTests
         await broker.PublishAsync(CommandsTopic, ContractJson.Serialize(command));
 
         await WaitUntilAsync(() => Results(broker).Count >= 1, "a result");
-        var result = Assert.Single(Results(broker));
+
+        // At-least-once: the replay loop may re-send a result the handler is still publishing; every copy is identical.
+        AssertIdenticalResultPayloads(broker);
+        var result = Assert.Single(Results(broker).DistinctBy(r => r.CommandId));
         Assert.Equal(command.CommandId, result.CommandId);
         Assert.Equal(CommandOutcome.Applied, result.Outcome);
 
@@ -54,7 +57,8 @@ public class CommandFlowTests
         await using var second = await StartEdgeAsync(broker, driver);
 
         await WaitUntilAsync(() => Results(broker).Any(r => r.CommandId == command.CommandId), "result of the queued command");
-        Assert.Equal(CommandOutcome.Applied, Results(broker).Single(r => r.CommandId == command.CommandId).Outcome);
+        AssertIdenticalResultPayloads(broker);
+        Assert.Equal(CommandOutcome.Applied, Results(broker).First(r => r.CommandId == command.CommandId).Outcome);
         Assert.Single(driver.Writes);
     }
 
@@ -115,6 +119,16 @@ public class CommandFlowTests
         ExpiresAtUtc = DateTimeOffset.UtcNow.AddMinutes(5),
         IssuedBy = "test-operator",
     };
+
+    /// <summary>Duplicates of a result are allowed (at-least-once), but only as byte-identical copies per command.</summary>
+    private static void AssertIdenticalResultPayloads(TestMqttBroker broker)
+    {
+        var payloads = broker.Received.Where(m => m.Topic == ResultsTopic).Select(m => Encoding.UTF8.GetString(m.Payload)).ToList();
+        foreach (var copies in payloads.GroupBy(p => ContractJson.Deserialize<CommandResult>(p).CommandId))
+        {
+            Assert.All(copies, p => Assert.Equal(copies.First(), p));
+        }
+    }
 
     private static List<CommandResult> Results(TestMqttBroker broker) => broker.Received
         .Where(m => m.Topic == ResultsTopic)

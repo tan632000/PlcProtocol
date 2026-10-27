@@ -9,15 +9,18 @@ namespace IndustrialIot.Edge.Drivers;
 /// </summary>
 public interface IPlcDriver
 {
-    /// <summary>Reads one value; the result has the CLR type mapped to <paramref name="type"/>.</summary>
-    Task<object> ReadAsync(PlcAddress address, PlcDataType type, CancellationToken ct);
+    /// <summary>
+    /// Reads all <paramref name="tags"/> once; the result has one entry per tag in the same order, holding the CLR
+    /// type mapped to the tag's data type or the exception for that tag. Cancellation throws.
+    /// </summary>
+    Task<IReadOnlyList<PlcReadResult>> ReadAsync(IReadOnlyList<ResolvedTag> tags, CancellationToken ct);
 
     /// <summary>
     /// Writes one value of the CLR type mapped to <paramref name="type"/>.
     /// <paramref name="ct"/> is honored only before the request is sent; once I/O starts the write
     /// runs to completion or fails, so a cancelled caller never leaves the outcome half-known.
     /// </summary>
-    Task WriteAsync(PlcAddress address, PlcDataType type, object value, CancellationToken ct);
+    Task WriteAsync(IPlcAddress address, PlcDataType type, object value, CancellationToken ct);
 
     /// <summary>Returns whether a connection to the PLC can be established now.</summary>
     Task<bool> IsReachableAsync(CancellationToken ct);

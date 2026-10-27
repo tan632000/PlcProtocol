@@ -19,8 +19,31 @@ public sealed class SiemensS7Options
     /// <summary>Slot of the CPU; 1 for S7-1200.</summary>
     public int Slot { get; set; } = 1;
 
+    /// <summary>CPU family: <c>S71200</c> (default) or <c>S71500</c>.</summary>
+    public string CpuType { get; set; } = "S71200";
+
     /// <summary>Budget for one whole operation: lock wait + connect + request/response.</summary>
     public int TimeoutMs { get; set; } = 3000;
+
+    /// <summary>Case-insensitive; only the 1200 and 1500 families are supported.</summary>
+    internal static bool TryParseCpuType(string? value, out S7.Net.CpuType cpuType)
+    {
+        cpuType = S7.Net.CpuType.S71200;
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return true;
+        }
+
+        // Names only: Enum.TryParse would also accept numeric strings.
+        var trimmed = value.Trim();
+        if (trimmed.Equals(nameof(S7.Net.CpuType.S71500), StringComparison.OrdinalIgnoreCase))
+        {
+            cpuType = S7.Net.CpuType.S71500;
+            return true;
+        }
+
+        return trimmed.Equals(nameof(S7.Net.CpuType.S71200), StringComparison.OrdinalIgnoreCase);
+    }
 }
 
 /// <summary>Rejects invalid <see cref="SiemensS7Options"/> so the host fails at startup, not at the first PLC call.</summary>
@@ -33,6 +56,11 @@ internal sealed class SiemensS7OptionsValidator : IValidateOptions<SiemensS7Opti
         if (string.IsNullOrWhiteSpace(options.Host))
         {
             failures.Add($"{SiemensS7Options.SectionName}:Host is required.");
+        }
+
+        if (!SiemensS7Options.TryParseCpuType(options.CpuType, out _))
+        {
+            failures.Add($"{SiemensS7Options.SectionName}:CpuType must be S71200 or S71500 (was '{options.CpuType}').");
         }
 
         AddIfOutOfRange(failures, nameof(options.Port), options.Port, 1, 65535);

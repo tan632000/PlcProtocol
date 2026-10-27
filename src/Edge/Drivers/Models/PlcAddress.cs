@@ -4,7 +4,7 @@ namespace IndustrialIot.Edge.Drivers.Models;
 /// An immutable, validated S7 address. Create it only through <see cref="PlcAddressParser"/>
 /// so every instance is guaranteed to be within the documented ranges.
 /// </summary>
-public sealed record PlcAddress
+public sealed record PlcAddress : IPlcAddress
 {
     internal PlcAddress(PlcArea area, int dbNumber, int byteOffset, int? bitOffset, int sizeBytes)
     {
@@ -33,6 +33,9 @@ public sealed record PlcAddress
 
     /// <summary>Normalized spelling (uppercase, no leading zeros), e.g. <c>DB1.DBW2</c>.</summary>
     public string Canonical { get; }
+
+    /// <summary>The input area is read-only by definition; every other S7 area can be written.</summary>
+    public string? ReadOnlyReason => Area == PlcArea.Input ? "input area (I) tags cannot be writable" : null;
 
     public override string ToString() => Canonical;
 

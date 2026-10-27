@@ -148,7 +148,8 @@
 
     const [plcText, plcCls] = stale ? ["Dữ liệu cũ", "warn"] : (PLC_STATES[s.plc.state] || [s.plc.state, "idle"]);
     setBadge($("plcState"), plcText, plcCls);
-    $("plcDetail").textContent = `${s.plc.host}:${s.plc.port} · Rack ${s.plc.rack} / Slot ${s.plc.slot}`;
+    const rackSlot = s.plc.rack == null || s.plc.slot == null ? "" : ` · Rack ${s.plc.rack} / Slot ${s.plc.slot}`;
+    $("plcDetail").textContent = `${s.plc.protocol} · ${s.plc.host}:${s.plc.port}${rackSlot}`;
 
     $("lastCycle").textContent = last === null ? "—" : formatTime(s.lastCycleUtc);
     $("pollDetail").textContent = last === null

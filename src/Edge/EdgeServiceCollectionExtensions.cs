@@ -1,6 +1,7 @@
 using IndustrialIot.Edge.Buffering;
 using IndustrialIot.Edge.Commands;
 using IndustrialIot.Edge.Drivers;
+using IndustrialIot.Edge.Drivers.Models;
 using IndustrialIot.Edge.Messaging;
 using IndustrialIot.Edge.Monitoring;
 using IndustrialIot.Edge.Polling;
@@ -25,12 +26,16 @@ public static class EdgeServiceCollectionExtensions
         services.AddOptions<EdgeOptions>().Bind(edgeSection).ValidateOnStart();
         services.TryAddEnumerable(ServiceDescriptor.Singleton<IValidateOptions<EdgeOptions>, EdgeOptionsValidator>());
 
-        services.AddSiemensS7Driver(configuration);
+        // Off by default (read-only Edge); the listener checks it at start, and the protocol switch reads it first.
+        services.AddOptions<CommandsOptions>().Bind(configuration.GetSection(CommandsOptions.SectionName)).ValidateOnStart();
+        services.AddPlcProtocol(configuration);
 
         // Bound from "Edge" (not "Edge:Tags"): the array Edge:Tags maps to PlcTagCatalogOptions.Tags.
         services.AddOptions<PlcTagCatalogOptions>().Bind(edgeSection).ValidateOnStart();
         services.TryAddEnumerable(ServiceDescriptor.Singleton<IValidateOptions<PlcTagCatalogOptions>, PlcTagCatalogOptionsValidator>());
-        services.TryAddSingleton(provider => new PlcTagCatalog(provider.GetRequiredService<IOptions<PlcTagCatalogOptions>>().Value));
+        services.TryAddSingleton(provider => new PlcTagCatalog(
+            provider.GetRequiredService<IOptions<PlcTagCatalogOptions>>().Value,
+            provider.GetRequiredService<IPlcAddressSyntax>()));
 
         services.TryAddSingleton(TimeProvider.System);
 
@@ -54,8 +59,6 @@ public static class EdgeServiceCollectionExtensions
         services.AddHostedService(provider => provider.GetRequiredService<MqttConnection>());
         services.AddHostedService<TelemetryPublisher>();
 
-        // Off by default (read-only Edge); the listener checks it at start, so the same gate holds in every host.
-        services.AddOptions<CommandsOptions>().Bind(configuration.GetSection(CommandsOptions.SectionName)).ValidateOnStart();
         services.TryAddSingleton<CommandLog>();
         services.TryAddSingleton<CommandExecutor>();
         services.AddHostedService<CommandListener>();
@@ -69,13 +72,13 @@ public static class EdgeServiceCollectionExtensions
 }
 
 /// <summary>Builds the catalog once at start so an unsafe catalog fails the host instead of the first write.</summary>
-internal sealed class PlcTagCatalogOptionsValidator : IValidateOptions<PlcTagCatalogOptions>
+internal sealed class PlcTagCatalogOptionsValidator(IPlcAddressSyntax syntax) : IValidateOptions<PlcTagCatalogOptions>
 {
     public ValidateOptionsResult Validate(string? name, PlcTagCatalogOptions options)
     {
         try
         {
-            _ = new PlcTagCatalog(options);
+            _ = new PlcTagCatalog(options, syntax);
             return ValidateOptionsResult.Success;
         }
         catch (InvalidOperationException ex)

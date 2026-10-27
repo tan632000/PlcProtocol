@@ -12,14 +12,14 @@ internal sealed class FakePlcDriver : IPlcDriver
 {
     private readonly ConcurrentDictionary<string, Func<object>> _reads = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, Exception> _writeFailures = new(StringComparer.OrdinalIgnoreCase);
-    private readonly ConcurrentQueue<(PlcAddress Address, PlcDataType Type)> _readCalls = new();
-    private readonly ConcurrentQueue<(PlcAddress Address, PlcDataType Type, object Value)> _writeCalls = new();
+    private readonly ConcurrentQueue<(IPlcAddress Address, PlcDataType Type)> _readCalls = new();
+    private readonly ConcurrentQueue<(IPlcAddress Address, PlcDataType Type, object Value)> _writeCalls = new();
     private volatile TaskCompletionSource? _gate;
     private TaskCompletionSource _gateEntered = NewSignal();
 
-    public IReadOnlyList<(PlcAddress Address, PlcDataType Type)> Reads => [.. _readCalls];
+    public IReadOnlyList<(IPlcAddress Address, PlcDataType Type)> Reads => [.. _readCalls];
 
-    public IReadOnlyList<(PlcAddress Address, PlcDataType Type, object Value)> Writes => [.. _writeCalls];
+    public IReadOnlyList<(IPlcAddress Address, PlcDataType Type, object Value)> Writes => [.. _writeCalls];
 
     public void SetRead(string address, object value) => _reads[address] = () => value;
 
@@ -39,7 +39,10 @@ internal sealed class FakePlcDriver : IPlcDriver
 
     public void Release() => Interlocked.Exchange(ref _gate, null)?.TrySetResult();
 
-    public async Task<object> ReadAsync(PlcAddress address, PlcDataType type, CancellationToken ct)
+    public Task<IReadOnlyList<PlcReadResult>> ReadAsync(IReadOnlyList<ResolvedTag> tags, CancellationToken ct) =>
+        SequentialBatchReader.ReadAsync(tags, (tag, token) => ReadOneAsync(tag.Address, tag.DataType, token), ct);
+
+    private async Task<object> ReadOneAsync(IPlcAddress address, PlcDataType type, CancellationToken ct)
     {
         _readCalls.Enqueue((address, type));
         await PassGateAsync(ct).ConfigureAwait(false);
@@ -47,7 +50,7 @@ internal sealed class FakePlcDriver : IPlcDriver
         return _reads.TryGetValue(address.Canonical, out var result) ? result() : DefaultValue(type);
     }
 
-    public async Task WriteAsync(PlcAddress address, PlcDataType type, object value, CancellationToken ct)
+    public async Task WriteAsync(IPlcAddress address, PlcDataType type, object value, CancellationToken ct)
     {
         _writeCalls.Enqueue((address, type, value));
         await PassGateAsync(ct).ConfigureAwait(false);

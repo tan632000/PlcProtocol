@@ -74,7 +74,9 @@ internal sealed class TagPoller(
         var plcUnavailable = false;
         var unexpectedLogged = false;
 
+        var readStarted = clock.GetTimestamp();
         var results = await ReadAllAsync(ct).ConfigureAwait(false);
+        var readDuration = clock.GetElapsedTime(readStarted);
 
         for (var i = 0; i < catalog.Tags.Count; i++)
         {
@@ -124,7 +126,8 @@ internal sealed class TagPoller(
         snapshot.Publish(new PollCycle(
             clock.GetUtcNow(),
             plcUnavailable,
-            [.. samples.Select((s, i) => new TagReading(s.TagId, s.Value, s.Quality, s.TimestampUtc, errors[i]))]));
+            [.. samples.Select((s, i) => new TagReading(s.TagId, s.Value, s.Quality, s.TimestampUtc, errors[i]))],
+            readDuration));
 
         try
         {

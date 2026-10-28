@@ -30,6 +30,7 @@ public static class CloudServiceCollectionExtensions
         services.AddOptions<RetentionOptions>().Bind(configuration.GetSection(RetentionOptions.SectionName)).ValidateOnStart();
         services.AddOptions<HealthOptions>().Bind(configuration.GetSection(HealthOptions.SectionName)).ValidateOnStart();
         services.AddOptions<ForwardedHeadersSettings>().Bind(configuration.GetSection(ForwardedHeadersSettings.SectionName)).ValidateOnStart();
+        services.AddOptions<ScadaOptions>().Bind(configuration.GetSection(ScadaOptions.SectionName)).ValidateOnStart();
 
         services.TryAddSingleton<CloudOptionsValidator>();
         services.TryAddEnumerable(ServiceDescriptor.Singleton<IValidateOptions<DatabaseOptions>, CloudOptionsValidator>(p => p.GetRequiredService<CloudOptionsValidator>()));
@@ -38,6 +39,7 @@ public static class CloudServiceCollectionExtensions
         services.TryAddEnumerable(ServiceDescriptor.Singleton<IValidateOptions<RetentionOptions>, CloudOptionsValidator>(p => p.GetRequiredService<CloudOptionsValidator>()));
         services.TryAddEnumerable(ServiceDescriptor.Singleton<IValidateOptions<HealthOptions>, CloudOptionsValidator>(p => p.GetRequiredService<CloudOptionsValidator>()));
         services.TryAddEnumerable(ServiceDescriptor.Singleton<IValidateOptions<ForwardedHeadersSettings>, CloudOptionsValidator>(p => p.GetRequiredService<CloudOptionsValidator>()));
+        services.TryAddEnumerable(ServiceDescriptor.Singleton<IValidateOptions<ScadaOptions>, CloudOptionsValidator>(p => p.GetRequiredService<CloudOptionsValidator>()));
 
         services.TryAddSingleton(TimeProvider.System);
 
@@ -66,6 +68,7 @@ public static class CloudServiceCollectionExtensions
         services.AddCloudProblemDetails();
         services.TryAddEnumerable(ServiceDescriptor.Singleton<IEndpointModule, EdgesEndpoints>());
         services.TryAddEnumerable(ServiceDescriptor.Singleton<IEndpointModule, TelemetryEndpoints>());
+        services.TryAddEnumerable(ServiceDescriptor.Singleton<IEndpointModule, ScadaEndpoints>());
 
         services.AddSignalR();
         services.TryAddSingleton<LiveNotifier>();

@@ -5,7 +5,7 @@
 #
 #   bash deployments/scripts/smoke-test.sh          (Windows: run with Git Bash)
 #
-# Prints PASS/FAIL per check (SMOKE-00..07); exit 0 only when every check passes. Never prints a secret.
+# Prints PASS/FAIL per check (SMOKE-00..10; SMOKE-07 runs last); exit 0 only when every check passes. Never prints a secret.
 set -uo pipefail
 export MSYS_NO_PATHCONV=1
 # The guard checks the default ports, so the stack must use exactly those; a smoke stack never restarts itself.
@@ -13,6 +13,8 @@ unset IIOT_API_PORT IIOT_KEYCLOAK_PORT IIOT_MQTT_PORT
 export IIOT_RESTART=no
 
 HELPER_IMAGE="eclipse-mosquitto@sha256:21421af7b32bf9ce508e9090c8eb13bb81f410ca778dc205506180a6f862d0eb"
+# The same curl image get-token.sh uses, for requests from inside the compose network.
+CURL_IMAGE="curlimages/curl@sha256:c1fe1679c34d9784c1b0d1e5f62ac0a79fca01fb6377cdd33e90473c6f9f9a69"
 PROJECT="iiot-smoke"
 # The Cloud image this stack builds: its own name, never the trial stack's or a deployed one.
 export IIOT_CLOUD_IMAGE="${PROJECT}-cloud"
@@ -210,6 +212,47 @@ else
   echo "  could not export the image"; image_ok=0
 fi
 [ "$image_ok" = 1 ] && pass SMOKE-06 "no private key or generated secret in any image layer" || fail SMOKE-06 "secret material in the image"
+
+# --- SMOKE-08: the SCADA page is served without a token, with its CSP. ---
+headers="$(curl -s -D - -o /dev/null "$API/scada/" | tr -d '\r')"
+if [[ "$headers" == "HTTP/1.1 200"* ]] \
+   && grep -qiF "content-security-policy: default-src 'none'; script-src 'self';" <<<"$headers" \
+   && grep -qiF "form-action 'self' https://keycloak:8443" <<<"$headers"; then
+  pass SMOKE-08 "/scada/ without a token -> 200 with the CSP"
+else
+  fail SMOKE-08 "/scada/ -> $(head -1 <<<"$headers")"
+fi
+
+# --- SMOKE-09: the page logs in with iiot-scada at the issuer the Cloud validates. ---
+body="$(curl -s "$API/scada/config")"
+if [ "$body" = '{"authority":"https://keycloak:8443/realms/iiot","clientId":"iiot-scada"}' ]; then
+  pass SMOKE-09 "/scada/config -> iiot-scada at https://keycloak:8443/realms/iiot"
+else
+  fail SMOKE-09 "/scada/config -> unexpected body"
+fi
+
+# --- SMOKE-10: iiot-scada has no password grant (browser login only). ---
+# The viewer's real password is sent, read by curl from the mounted file as get-token.sh does. Keycloak refuses the
+# client before it checks the password, so the iiot-cli control with the same password is what proves the request
+# itself was sound. Responses are never printed: the control's carries a token.
+password_grant() {
+  docker run --rm --user 0 --network "${PROJECT}_default" \
+    -v "$secrets/ca.pem:/run/iiot/ca.pem:ro" \
+    -v "$secrets/passwords/viewer.txt:/run/iiot/password:ro" \
+    "$CURL_IMAGE" -s --cacert /run/iiot/ca.pem -w '\n%{http_code}' \
+    -d grant_type=password -d "client_id=$1" -d username=viewer -d scope=openid \
+    --data-urlencode "password@/run/iiot/password" \
+    https://keycloak:8443/realms/iiot/protocol/openid-connect/token
+}
+scada_grant="$(password_grant iiot-scada 2>/dev/null)" || scada_grant=""
+cli_grant="$(password_grant iiot-cli 2>/dev/null)" || cli_grant=""
+if [ "${scada_grant##*$'\n'}" = "400" ] && [[ "$scada_grant" == *'"error":"unauthorized_client"'* ]] \
+   && [ "${cli_grant##*$'\n'}" = "200" ] && [[ "$cli_grant" == *'"access_token":"'* ]]; then
+  pass SMOKE-10 "iiot-scada password grant -> 400 unauthorized_client (iiot-cli control -> 200)"
+else
+  fail SMOKE-10 "iiot-scada password grant -> ${scada_grant##*$'\n'}, iiot-cli control -> ${cli_grant##*$'\n'}"
+fi
+unset scada_grant cli_grant
 
 # --- SMOKE-07: the tracked tree is unchanged (nothing rendered or written into the repository). ---
 status_after="$(tree_snapshot)" || status_after="<git status failed>"

@@ -61,6 +61,7 @@ docker compose -f deployments/compose.yaml down -v                   # dừng v�
 | Dịch vụ | Địa chỉ | Ai truy cập được |
 |---|---|---|
 | Cloud API | `http://127.0.0.1:8080` | chỉ chính máy này (HTTP, không TLS) |
+| Trang SCADA chẩn đoán (chỉ xem) | `http://localhost:8080/scada/` (hoặc cổng `IIOT_API_PORT`) — xem [Mở trang SCADA](#mở-trang-scada-chỉ-xem) | chỉ chính máy này |
 | Keycloak | `https://127.0.0.1:8443` (chỉ dùng cho token qua `get-token.sh`; trang admin chuyển hướng sang `https://keycloak:8443`, cần thêm `127.0.0.1 keycloak` vào file hosts nếu muốn mở) | chỉ chính máy này |
 | Mosquitto | `mqtts://<IP máy>:8883` | cả mạng LAN (Edge cần) |
 | PostgreSQL | không mở cổng ra ngoài | chỉ các container |
@@ -82,11 +83,56 @@ curl -X POST -H "Authorization: Bearer $OP" -H "Content-Type: application/json" 
 ```
 
 `get-token.sh` gọi Keycloak từ bên trong mạng compose, nên token luôn có issuer
-`https://keycloak:8443/realms/iiot` — đúng địa chỉ Cloud dùng để kiểm tra. Lấy token bằng trình duyệt hay gọi
-thẳng `https://127.0.0.1:8443` sẽ ra token Cloud không chấp nhận.
+`https://keycloak:8443/realms/iiot` — đúng địa chỉ Cloud dùng để kiểm tra. Token lấy bằng cách gọi thẳng
+`https://127.0.0.1:8443` có issuer khác nên Cloud không chấp nhận. Trang SCADA đăng nhập qua
+`https://keycloak:8443` (cần dòng hosts ở mục dưới), nên token của nó hợp lệ.
 
 > ⚠️ Mặc định hệ thống **chỉ đọc**: lệnh POST ở trên trả `404`. Khi đã bật đủ bốn công tắc ghi (mục dưới), lệnh
 > này **ghi thật xuống PLC** nếu Edge `line1-edge01` đang chạy và tag đó là `"Writable": true`.
+
+### Mở trang SCADA (chỉ xem)
+
+Cloud phục vụ một trang web chỉ hiển thị: danh sách Edge, bảng giá trị cập nhật realtime và trend một tag (15 phút
+hoặc 1 giờ). Trang không có nút ghi nào. Đăng nhập bằng Keycloak (Authorization Code + PKCE, client `iiot-scada`).
+
+> Đây là **công cụ chẩn đoán / nghiệm thu**: xem dữ liệu đã lên Cloud chưa, khi lắp đặt hoặc khi SCADA gặp sự cố.
+> Nó **không phải sản phẩm SCADA**. SCADA thật (màn hình mimic, alarm, giao diện cho khách) là hệ thống riêng, đọc
+> dữ liệu qua API REST và SignalR của Cloud, đăng nhập bằng cùng client `iiot-scada` (khi chạy ở domain khác cần
+> thêm CORS và redirect URI tương ứng).
+
+Một lần trên máy mở trang (Windows):
+
+1. Thêm dòng `127.0.0.1 keycloak` vào `C:\Windows\System32\drivers\etc\hosts` (mở Notepad bằng **Run as
+   administrator**). Trình duyệt phải tới Keycloak đúng địa chỉ `https://keycloak:8443` mà Cloud kiểm tra.
+2. Tin CA dev cho user hiện tại (Edge/Chrome dùng kho chứng chỉ của Windows):
+   ```powershell
+   certutil -user -addstore Root deployments\.secrets\ca.pem
+   ```
+   Firefox có kho riêng: bật `security.enterprise_roots.enabled` trong `about:config` hoặc import `ca.pem`. Không nên
+   bấm "bỏ qua cảnh báo" trước một trang nhập mật khẩu; nếu vẫn làm, hãy mở `https://keycloak:8443` một lần trước để
+   trình duyệt chấp nhận, nếu không bước đổi mã lấy token (gọi từ JavaScript) sẽ lỗi.
+3. Nếu stack đã chạy từ trước khi có trang SCADA, nạp lại realm (Keycloak chạy `start-dev`, không lưu dữ liệu riêng):
+   ```bash
+   docker compose -f deployments/compose.yaml up -d --build --force-recreate keycloak cloud
+   ```
+
+Mở `http://localhost:8080/scada/` (hoặc `http://127.0.0.1:8080/scada/`). Máy Windows mà http.sys đã giữ cổng 8080
+thì chạy stack với `IIOT_API_PORT=8090` và mở `http://localhost:8090/scada/`; realm đã đăng ký cả hai cổng. Cổng khác
+thì phải sửa `redirectUris`/`webOrigins`/`post.logout.redirect.uris` của `iiot-scada` trong realm. Đăng nhập `viewer`
+hoặc `operator` (mật khẩu trong `deployments/.secrets/passwords/`).
+
+| Trạng thái trên trang | Ý nghĩa |
+|---|---|
+| Đang cập nhật | Hub realtime đã kết nối, dữ liệu đang về |
+| Đang tải… | Đang lấy giá trị mới nhất của Edge vừa chọn |
+| Không nhận dữ liệu mới | Hơn 30 giây không có mẫu nào của Edge (Edge tắt, mất mạng, hoặc Edge đọc chậm hơn 30 giây một chu kỳ — ngưỡng cố định) |
+| Mất kết nối realtime, đang kết nối lại… | Trang tự kết nối lại (1, 2, 5, 10 rồi 30 giây một lần) |
+| Tài khoản không có quyền xem | User không có role `Viewer` hoặc `Operator` |
+| Cloud không chấp nhận token vừa nhận | Sai cấu hình issuer (thường do thiếu dòng hosts); trang dừng thay vì đăng nhập lặp lại |
+
+Token chỉ nằm trong bộ nhớ của tab: tải lại trang là đăng nhập lại (nhanh, vì Keycloak còn phiên). Token của trang
+**chỉ mang role `Viewer`**, kể cả khi đăng nhập bằng `operator`, nên không dùng được để gửi lệnh ghi dù đã bật chế độ
+ghi. Tắt trang: `Cloud__Scada__Enabled=false` (mọi đường dẫn `/scada` trả 404).
 
 ### Chế độ read-only và cách bật ghi
 
@@ -139,8 +185,8 @@ Kiểm tra từ máy Edge: `Test-NetConnection <IP máy stack> -Port 8883`.
 bash deployments/scripts/smoke-test.sh
 ```
 
-Smoke test dựng một stack **riêng** (project `iiot-smoke`, secret tạm, Edge giả `smoke-edge`), chạy 8 bước
-kiểm tra `SMOKE-00`…`SMOKE-07` rồi xoá sạch. Nó **từ chối chạy** (exit 2) khi stack thật đang chạy (cổng
+Smoke test dựng một stack **riêng** (project `iiot-smoke`, secret tạm, Edge giả `smoke-edge`), chạy 11 bước
+kiểm tra `SMOKE-00`…`SMOKE-10` (gồm trang SCADA và việc `iiot-scada` không có password grant) rồi xoá sạch. Nó **từ chối chạy** (exit 2) khi stack thật đang chạy (cổng
 8080/8443/8883 bận), nên không bao giờ đụng tới dữ liệu chạy thử hay gửi lệnh tới Edge thật.
 
 ## 7. Xử lý sự cố
@@ -149,7 +195,9 @@ kiểm tra `SMOKE-00`…`SMOKE-07` rồi xoá sạch. Nó **từ chối chạy**
 |---|---|---|
 | `dev-secrets.sh` báo "not empty" | Đã có bộ secret | Dùng `--add-edge`, hoặc xoá `deployments/.secrets` (mất mọi mật khẩu, phải cài lại Edge). Trên Linux hai thư mục `mosquitto/` và `keycloak/` thuộc uid của container: xoá bằng `sudo rm -rf deployments/.secrets` |
 | `/health/ready` trả 503 | DB hoặc MQTT chưa sẵn sàng | `docker compose -f deployments/compose.yaml logs cloud mosquitto` |
-| API trả 401 với token hợp lệ | Token lấy từ địa chỉ khác `keycloak:8443` | Dùng `get-token.sh` |
+| API trả 401 với token hợp lệ | Token lấy từ địa chỉ khác `keycloak:8443` | Dòng lệnh: dùng `get-token.sh`. Trang SCADA: thêm `127.0.0.1 keycloak` vào hosts |
+| Trang SCADA báo "Client not found" hoặc "Invalid redirect uri" ở Keycloak | Keycloak chưa nạp realm mới, hoặc mở trang bằng cổng/địa chỉ khác `localhost`/`127.0.0.1` với cổng 8080 hoặc 8090 | `up -d --force-recreate keycloak`; dùng đúng địa chỉ (xem [Mở trang SCADA](#mở-trang-scada-chỉ-xem)) |
+| Trang SCADA báo không đổi được mã đăng nhập, console có lỗi CORS hoặc chứng chỉ | Trình duyệt chưa tin CA dev | `certutil -user -addstore Root deployments\.secrets\ca.pem`, khởi động lại trình duyệt |
 | Edge báo lỗi chứng chỉ | IP/tên Edge dùng không có trong `--san` | Tạo lại secret với `--san` đúng (phải cài lại Edge) |
 | Edge kết nối được nhưng Cloud không nhận dữ liệu | EdgeId chưa có trong allow-list hoặc Username ≠ EdgeId | `--add-edge` + `--force-recreate`; kiểm tra cấu hình Edge |
 | Mosquitto log "not authorised" | Sai mật khẩu, sai username, hoặc publish ra topic của Edge khác | Kiểm tra `Edge__Mqtt__Password` và EdgeId |
@@ -180,6 +228,9 @@ khoảng 20 Edge. Vượt giới hạn thì broker bỏ bớt tin cho Cloud; d�
    không build tay: làm theo [docs/server-deploy.md](server-deploy.md).
 3. Từng Edge (gói cài mới).
 
+Khi `deployments/keycloak/iiot-realm.json` đổi (ví dụ thêm client `iiot-scada` cho trang SCADA): `docker compose -f
+deployments/compose.yaml up -d --force-recreate keycloak` để nạp lại realm.
+
 Edge mới chạy với broker còn ACL cũ sẽ **không kết nối được** (broker từ chối subscription `telemetry-acks`) —
 không mất dữ liệu, mọi mẫu nằm lại trong buffer tới khi broker được cập nhật. Edge cũ chạy với Cloud mới vẫn bình
 thường (xác nhận gửi tới topic không ai đọc).
@@ -189,6 +240,8 @@ thường (xác nhận gửi tới topic không ai đọc).
 Stack này đánh đổi bảo mật để dựng nhanh. Chỉ dùng trên **mạng tin cậy**, **máy một người dùng**, cho **chạy thử**:
 
 - Cloud API là **HTTP không TLS**, chỉ mở trên `127.0.0.1`. Chưa có reverse proxy TLS (ngoài phạm vi đợt này).
+  Trang SCADA cũng vậy; nó dựa vào `http://localhost` được trình duyệt coi là an toàn (cần cho PKCE), nên mở qua IP
+  LAN hay tên máy khác sẽ không đăng nhập được cho tới khi có HTTPS.
 - Chứng chỉ do **CA dev** tự ký; Keycloak chạy **dev mode** và cho phép password grant (`iiot-cli`).
 - Mật khẩu đi vào container qua `env_file`: ai thuộc nhóm `docker` / `docker-users` đều xem được bằng
   `docker inspect`.

@@ -50,8 +50,10 @@ try {
         foreach ($name in 'IndustrialIot.Edge.exe', 'appsettings.json', 'install-edge.ps1', 'uninstall-edge.ps1', 'hostfxr.dll') {
             if (-not (Test-Path (Join-Path $expanded $name))) { $packaged = $false; Write-Host "  missing in package: $name" }
         }
+        # Files the dev machine wrote under src\Edge\data (settings, password hash, buffer) must not ship.
+        if (Test-Path (Join-Path $expanded 'data')) { $packaged = $false; Write-Host '  the package contains a data folder' }
     }
-    Report 'VERIFY-PACKAGE' $packaged 'self-contained package with exe, runtime, appsettings.json and the scripts'
+    Report 'VERIFY-PACKAGE' $packaged 'self-contained package with exe, runtime, appsettings.json and the scripts, no data folder'
 
     # --- VERIFY-FAILFAST: the packaged exe in console mode stops on invalid configuration, naming the key. ---
     $failFast = $false

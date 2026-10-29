@@ -4,9 +4,11 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text.Json;
 using IndustrialIot.Edge.Drivers;
+using IndustrialIot.Edge.Drivers.Models;
 using IndustrialIot.Edge.Tests.Fakes;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
+using Microsoft.Extensions.Time.Testing;
 
 namespace IndustrialIot.Edge.Tests;
 
@@ -41,6 +43,37 @@ public class MonitorTests
         Assert.Equal(["true", "250", "25.5"], tags.Select(t => t.GetProperty("value").GetRawText()));
         Assert.All(tags, t => Assert.Equal("good", t.GetProperty("quality").GetString()));
         Assert.All(tags, t => Assert.Equal(JsonValueKind.Null, t.GetProperty("error").ValueKind));
+    }
+
+    [Fact]
+    public async Task Status_ReadMs_IsTheBatchReadDurationOfTheLastCycle()
+    {
+        var clock = new FakeTimeProvider();
+        var port = FreePort();
+        var overrides = new Dictionary<string, string?>
+        {
+            ["Edge:Monitor:Enabled"] = "true",
+            ["Edge:Monitor:Port"] = port.ToString(CultureInfo.InvariantCulture),
+            ["Edge:Tags:0:TagId"] = "Line1.Speed",
+            ["Edge:Tags:0:Address"] = "DB1.DBW2",
+            ["Edge:Tags:0:DataType"] = "Int",
+            ["Edge:Poll:IntervalMs"] = "3600000",
+        };
+        await using var edge = EdgeTestHost.Create(
+            overrides,
+            services =>
+            {
+                services.AddSingleton<IPlcDriver>(new ClockAdvancingDriver(clock, TimeSpan.FromMilliseconds(250)));
+                services.AddSingleton<TimeProvider>(clock);
+            },
+            runAgentServices: true);
+        using var http = Client(port);
+
+        var before = await StartAndReadStatusAsync(edge, http);
+        var status = await WaitForStatusAsync(http, s => s.GetProperty("lastCycleUtc").ValueKind != JsonValueKind.Null);
+
+        Assert.Equal(JsonValueKind.Null, before.GetProperty("readMs").ValueKind);
+        Assert.Equal(250, status.GetProperty("readMs").GetDouble());
     }
 
     [Fact]
@@ -200,6 +233,41 @@ public class MonitorTests
         var edge = EdgeTestHost.Create(overrides, services => services.AddSingleton<IPlcDriver>(driver), runAgentServices: true);
         await edge.Host.StartAsync();
         return edge;
+    }
+
+    /// <summary>Starts the host while the driver holds the first read, so the status is captured before any cycle.</summary>
+    private static async Task<JsonElement> StartAndReadStatusAsync(EdgeTestHost edge, HttpClient http)
+    {
+        var driver = (ClockAdvancingDriver)edge.Services.GetRequiredService<IPlcDriver>();
+        await edge.Host.StartAsync();
+        await driver.Entered.WaitAsync(TimeSpan.FromSeconds(5));
+        using var document = JsonDocument.Parse(await http.GetStringAsync("/api/status"));
+        var status = document.RootElement.Clone();
+        driver.Release();
+        return status;
+    }
+
+    /// <summary>Holds each batch until released, then moves the clock forward as if the PLC took that long.</summary>
+    private sealed class ClockAdvancingDriver(FakeTimeProvider clock, TimeSpan readTime) : IPlcDriver
+    {
+        private readonly TaskCompletionSource _entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _released = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public Task Entered => _entered.Task;
+
+        public void Release() => _released.TrySetResult();
+
+        public async Task<IReadOnlyList<PlcReadResult>> ReadAsync(IReadOnlyList<ResolvedTag> tags, CancellationToken ct)
+        {
+            _entered.TrySetResult();
+            await _released.Task.WaitAsync(ct);
+            clock.Advance(readTime);
+            return [.. tags.Select(_ => PlcReadResult.Ok((short)1))];
+        }
+
+        public Task WriteAsync(IPlcAddress address, PlcDataType type, object value, CancellationToken ct) => Task.CompletedTask;
+
+        public Task<bool> IsReachableAsync(CancellationToken ct) => Task.FromResult(true);
     }
 
     private static HttpClient Client(int port) => new()

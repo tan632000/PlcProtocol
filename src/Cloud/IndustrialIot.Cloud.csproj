@@ -18,6 +18,14 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- The SCADA page, served from the assembly by ScadaEndpoints (never from the file system). -->
+    <EmbeddedResource Include="Scada\index.html" LogicalName="IndustrialIot.Cloud.Scada.index.html" />
+    <EmbeddedResource Include="Scada\app.js" LogicalName="IndustrialIot.Cloud.Scada.app.js" />
+    <EmbeddedResource Include="Scada\scada-core.js" LogicalName="IndustrialIot.Cloud.Scada.scada-core.js" />
+    <EmbeddedResource Include="Scada\signalr.min.js" LogicalName="IndustrialIot.Cloud.Scada.signalr.min.js" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\Shared\IndustrialIot.Shared.csproj" />
   </ItemGroup>
 

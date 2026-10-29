@@ -72,6 +72,18 @@ public sealed class ForwardedHeadersSettings
     public List<string> KnownProxies { get; set; } = [];
 }
 
+/// <summary>The display-only SCADA page under <c>/scada/</c>, bound from <c>Cloud:Scada</c>.</summary>
+public sealed class ScadaOptions
+{
+    public const string SectionName = "Cloud:Scada";
+
+    /// <summary>Off answers 404 on every <c>/scada</c> path. Read at start.</summary>
+    public bool Enabled { get; set; } = true;
+
+    /// <summary>The Keycloak client the page logs in with; its authority is always <c>Cloud:Auth:Authority</c>.</summary>
+    public string ClientId { get; set; } = "iiot-scada";
+}
+
 /// <summary>Validates every Cloud section at start. Messages name the key, never its value.</summary>
 internal sealed partial class CloudOptionsValidator :
     IValidateOptions<DatabaseOptions>,
@@ -79,7 +91,8 @@ internal sealed partial class CloudOptionsValidator :
     IValidateOptions<CommandOptions>,
     IValidateOptions<RetentionOptions>,
     IValidateOptions<HealthOptions>,
-    IValidateOptions<ForwardedHeadersSettings>
+    IValidateOptions<ForwardedHeadersSettings>,
+    IValidateOptions<ScadaOptions>
 {
     public ValidateOptionsResult Validate(string? name, DatabaseOptions options) =>
         string.IsNullOrWhiteSpace(options.ConnectionString)
@@ -152,6 +165,11 @@ internal sealed partial class CloudOptionsValidator :
         return Result(failures);
     }
 
+    public ValidateOptionsResult Validate(string? name, ScadaOptions options) =>
+        options.ClientId is null || !ClientIdPattern().IsMatch(options.ClientId)
+            ? ValidateOptionsResult.Fail($"{ScadaOptions.SectionName}:ClientId must be 1..64 chars [A-Za-z0-9_.-].")
+            : ValidateOptionsResult.Success;
+
     // IPAddress.TryParse also accepts shorthand such as "10.1" (10.0.0.1); a typo must not trust a proxy.
     private static bool IsFullIpAddress(string? value) =>
         value is not null
@@ -164,4 +182,8 @@ internal sealed partial class CloudOptionsValidator :
     // Same rule as the contract edgeId (src/Shared/Common/ContractJson.cs).
     [GeneratedRegex(@"^[A-Za-z0-9_-]{1,64}\z", RegexOptions.CultureInvariant)]
     private static partial Regex EdgeIdPattern();
+
+    // The value is written into a JSON response and a login URL; keep it to URL-safe characters.
+    [GeneratedRegex(@"^[A-Za-z0-9_.-]{1,64}\z", RegexOptions.CultureInvariant)]
+    private static partial Regex ClientIdPattern();
 }

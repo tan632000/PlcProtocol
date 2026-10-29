@@ -5,7 +5,12 @@
   "roles": {
     "realm": [
       { "name": "Viewer", "description": "Reads edges, telemetry and commands" },
-      { "name": "Operator", "description": "Reads and issues commands" }
+      {
+        "name": "Operator",
+        "description": "Reads and issues commands; includes Viewer so a client scoped to Viewer still lets it read",
+        "composite": true,
+        "composites": { "realm": ["Viewer"] }
+      }
     ]
   },
   "clients": [
@@ -48,7 +53,59 @@
           }
         }
       ]
+    },
+    {
+      "clientId": "iiot-scada",
+      "name": "IIoT SCADA page (browser login, Authorization Code + PKCE, Viewer only)",
+      "enabled": true,
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "fullScopeAllowed": false,
+      "defaultClientScopes": ["basic"],
+      "optionalClientScopes": [],
+      "redirectUris": [
+        "http://localhost:8080/scada/", "http://127.0.0.1:8080/scada/",
+        "http://localhost:8090/scada/", "http://127.0.0.1:8090/scada/"
+      ],
+      "webOrigins": ["http://localhost:8080", "http://127.0.0.1:8080", "http://localhost:8090", "http://127.0.0.1:8090"],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "http://localhost:8080/scada/##http://127.0.0.1:8080/scada/##http://localhost:8090/scada/##http://127.0.0.1:8090/scada/"
+      },
+      "protocolMappers": [
+        {
+          "name": "realm roles as roles",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-realm-role-mapper",
+          "config": {
+            "claim.name": "roles",
+            "multivalued": "true",
+            "jsonType.label": "String",
+            "access.token.claim": "true",
+            "id.token.claim": "false",
+            "userinfo.token.claim": "false",
+            "introspection.token.claim": "true"
+          }
+        },
+        {
+          "name": "cloud api audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.custom.audience": "iiot-cloud-api",
+            "access.token.claim": "true",
+            "id.token.claim": "false",
+            "introspection.token.claim": "true"
+          }
+        }
+      ]
     }
+  ],
+  "scopeMappings": [
+    { "client": "iiot-scada", "roles": ["Viewer"] }
   ],
   "users": [
     {

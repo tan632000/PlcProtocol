@@ -6,8 +6,8 @@ namespace IndustrialIot.Edge.Monitoring;
 /// <summary>One tag as the last poll cycle saw it; <see cref="Error"/> explains a bad reading.</summary>
 public sealed record TagReading(string TagId, JsonElement? Value, TelemetryQuality Quality, DateTimeOffset TimestampUtc, string? Error);
 
-/// <summary>Result of one whole poll cycle.</summary>
-public sealed record PollCycle(DateTimeOffset CompletedUtc, bool PlcUnavailable, IReadOnlyList<TagReading> Readings);
+/// <summary>Result of one whole poll cycle; <see cref="ReadDuration"/> is how long the batch read of all tags took.</summary>
+public sealed record PollCycle(DateTimeOffset CompletedUtc, bool PlcUnavailable, IReadOnlyList<TagReading> Readings, TimeSpan ReadDuration);
 
 /// <summary>
 /// The latest poll cycle, kept in memory for the local monitor page. The poller replaces it after every

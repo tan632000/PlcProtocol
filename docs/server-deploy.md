@@ -296,6 +296,12 @@ server đã ở sha đó và chỉ thay Cloud. Nếu đổi `mosquitto` hoặc A
 > Keycloak chạy `start-dev` không có volume: tạo lại container sẽ mất mọi thay đổi làm tay trong trang admin (realm được
 > nạp lại từ `deployments/keycloak/iiot-realm.json`). Muốn thay đổi bền thì sửa file realm trong git.
 
+> Commit thêm trang SCADA (client `iiot-scada`, role `Operator` chứa `Viewer`) đổi `deployments/keycloak`, nên CD sẽ
+> báo `manual upgrade needed` một lần: làm như trên với service `keycloak`. Trên server, trang SCADA chỉ dùng được qua
+> SSH tunnel cổng 8080 và 8443 cùng dòng hosts `127.0.0.1 keycloak` trên máy mở trình duyệt, cho tới khi có domain và
+> HTTPS (`redirectUris` của realm hiện chỉ có `localhost`/`127.0.0.1` với cổng 8080 và 8090). Đây là trang chẩn đoán,
+> không phải sản phẩm SCADA.
+
 ## 8. Edge trên máy Windows của khách
 
 Làm theo `docs/deployment.md`, mục "Edge trên Windows", với:

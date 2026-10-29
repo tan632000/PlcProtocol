@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SCADA</title>
+<style>
+  :root {
+    --bg: #f4f5f7; --panel: #ffffff; --text: #1d2330; --muted: #667085; --border: #dfe3ea; --line: #1f6feb;
+    --ok: #1a7f37; --ok-bg: #e6f4ea; --bad: #c62828; --bad-bg: #fdecea; --warn: #9a6700; --warn-bg: #fff4d6;
+    --idle: #475467; --idle-bg: #eef0f3; --head: #f8f9fb;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #12151b; --panel: #1b1f27; --text: #e6e9ef; --muted: #98a2b3; --border: #2c323d; --line: #58a6ff;
+      --ok: #4ac26b; --ok-bg: #12301c; --bad: #ff7b72; --bad-bg: #3a1614; --warn: #e3b341; --warn-bg: #3a2d0c;
+      --idle: #b0b8c4; --idle-bg: #262b34; --head: #20252e;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 "Segoe UI", system-ui, sans-serif; }
+  main { max-width: 1200px; margin: 0 auto; padding: 20px 16px 40px; }
+  header { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; margin-bottom: 16px; }
+  h1 { font-size: 20px; margin: 0; }
+  h2 { font-size: 16px; margin: 0; }
+  label { color: var(--muted); }
+  select, button { font: inherit; padding: 4px 10px; border: 1px solid var(--border); border-radius: 6px;
+                   background: var(--panel); color: var(--text); }
+  button { cursor: pointer; }
+  .spacer { flex: 1; }
+  .badge { display: inline-block; padding: 2px 10px; border-radius: 999px; font-weight: 600; font-size: 13px; }
+  .ok { color: var(--ok); background: var(--ok-bg); }
+  .bad { color: var(--bad); background: var(--bad-bg); }
+  .warn { color: var(--warn); background: var(--warn-bg); }
+  .idle { color: var(--idle); background: var(--idle-bg); }
+  #banner { margin-bottom: 16px; padding: 10px 14px; border-radius: 8px; color: var(--bad); background: var(--bad-bg); }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; overflow-x: auto; margin-bottom: 16px; }
+  table { width: 100%; border-collapse: collapse; min-width: 560px; }
+  th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--border); }
+  th { background: var(--head); font-size: 12px; text-transform: uppercase; color: var(--muted); }
+  tr:last-child td { border-bottom: 0; }
+  td.value { font-family: Consolas, monospace; font-size: 15px; font-weight: 600; }
+  td.mono { font-family: Consolas, monospace; }
+  #empty { padding: 12px; color: var(--muted); }
+  #trend { padding: 12px 14px; }
+  .trend-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; margin-bottom: 8px; }
+  .chart { display: flex; gap: 8px; }
+  .axis { display: flex; flex-direction: column; justify-content: space-between; color: var(--muted); font-size: 12px; min-width: 48px; text-align: right; }
+  svg { width: 100%; height: 240px; border: 1px solid var(--border); border-radius: 6px; }
+  polyline { fill: none; stroke: var(--line); stroke-width: 2; vector-effect: non-scaling-stroke; }
+  #trendNotice { color: var(--muted); font-size: 12px; margin-top: 6px; }
+  footer { font-size: 12px; color: var(--muted); }
+</style>
+<!-- SignalR's browser build is a classic script that defines window.signalR; it must load before app.js. -->
+<script src="signalr.min.js"></script>
+<script type="module" src="app.js"></script>
+</head>
+<body>
+<main>
+  <header>
+    <h1>SCADA</h1>
+    <label for="edge">Edge</label>
+    <select id="edge" disabled><option>…</option></select>
+    <span id="status" class="badge idle" role="status" aria-live="polite">Đang tải…</span>
+    <span class="spacer"></span>
+    <button id="logout" type="button" hidden>Đăng xuất</button>
+  </header>
+
+  <div id="banner" role="alert" hidden></div>
+  <button id="loginAgain" type="button" hidden>Đăng nhập lại</button>
+
+  <div id="content">
+    <section class="panel">
+      <table>
+        <thead><tr><th>Tag</th><th>Giá trị</th><th>Chất lượng</th><th>Thời điểm</th><th>Trend</th></tr></thead>
+        <tbody id="tags"></tbody>
+      </table>
+      <div id="empty">Chưa có dữ liệu cho Edge này.</div>
+    </section>
+
+    <section id="trend" class="panel" hidden>
+      <div class="trend-head">
+        <h2>Trend: <span id="trendTitle"></span></h2>
+        <label for="trendWindow">Khoảng</label>
+        <select id="trendWindow">
+          <option value="15">15 phút</option>
+          <option value="60">1 giờ</option>
+        </select>
+        <span class="spacer"></span>
+        <button id="trendClose" type="button">Đóng</button>
+      </div>
+      <div class="chart">
+        <div class="axis"><span id="chartMax"></span><span id="chartMin"></span></div>
+        <svg id="chart" viewBox="0 0 800 240" preserveAspectRatio="none" role="img" aria-label="Biểu đồ trend"></svg>
+      </div>
+      <div id="trendNotice"></div>
+    </section>
+  </div>
+
+  <footer>Chỉ xem: trang này không ghi xuống PLC. Giá trị cập nhật realtime từ Cloud.</footer>
+</main>
+</body>
+</html>

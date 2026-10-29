@@ -154,7 +154,7 @@
     $("lastCycle").textContent = last === null ? "—" : formatTime(s.lastCycleUtc);
     $("pollDetail").textContent = last === null
       ? `Chu kỳ ${s.pollIntervalMs} ms`
-      : `${((now - last) / 1000).toFixed(1)} giây trước · chu kỳ ${s.pollIntervalMs} ms`;
+      : `${((now - last) / 1000).toFixed(1)} giây trước · đọc ${s.readMs} ms · chu kỳ ${s.pollIntervalMs} ms`;
 
     setBadge($("mqttState"), s.mqtt.connected ? "Đã kết nối" : "Chưa kết nối", s.mqtt.connected ? "ok" : "warn");
     $("mqttDetail").textContent = `${s.mqtt.host}:${s.mqtt.port}`;

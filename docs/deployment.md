@@ -146,17 +146,20 @@ tắc đều bật; tắt bất kỳ cái nào là chặn ghi. Mỗi thay đổi
 | 1 | Edge `Edge:Commands:Enabled` = `true` | `C:\Program Files\IndustrialIot\Edge\appsettings.json`, mục `"Edge"` → `"Commands": { "Enabled": true }` | `Restart-Service IndustrialIot.Edge` |
 | 2 | Cloud `Cloud__Commands__Enabled=true` | thêm dòng vào `deployments/.secrets/cloud.env` | `docker compose -f deployments/compose.yaml up -d --force-recreate cloud` |
 | 3 | Broker `IIOT_MQTT_ACL=./mosquitto/acl-commands` | nên dùng dòng trong `deployments/.env` (compose đọc file này để thay biến); biến shell cũng được nhưng phải có ở **mọi** lệnh compose sau đó, thiếu là broker quay về ACL read-only. **Không** đặt trong `cloud.env`: `env_file` chỉ đưa biến vào container, không dùng để thay biến trong `compose.yaml` | `docker compose -f deployments/compose.yaml up -d --force-recreate mosquitto` |
-| 4 | Tag `"Writable": true` (kèm `Min`/`Max` nếu cần) | `appsettings.json` của Edge, từng tag | `Restart-Service IndustrialIot.Edge` |
+| 4 | Tag `"Writable": true` (kèm `Min`/`Max` nếu cần) | `C:\ProgramData\IndustrialIot\Edge\edge.settings.json` nếu file này tồn tại (xem [Trang cấu hình PLC và tag](#trang-cấu-hình-plc-và-tag)), nếu không thì `appsettings.json` của Edge; từng tag | `Restart-Service IndustrialIot.Edge` |
 
 Kiểm tra ACL đang dùng: `docker compose -f deployments/compose.yaml config | grep acl` (dòng `source:` phải kết thúc
 bằng `acl-commands`).
 
-**Cài lại Edge làm mất công tắc 1 và 4:** gỡ cài đặt chỉ giữ file cũ dưới dạng
+**Cài lại Edge làm mất công tắc 1** (và công tắc 4 nếu chưa có `edge.settings.json`): gỡ cài đặt chỉ giữ file cũ dưới dạng
 `C:\ProgramData\IndustrialIot\Edge\appsettings.backup.json` (`uninstall-edge.ps1 -RemoveData` xoá cả bản này), và
-bộ cài ghi lại `appsettings.json` mặc định (chỉ đọc). Sau khi cài lại, chép phần `Edge:Plc` (toàn bộ: `Protocol`,
-`Port`, `CpuType`, `Rack`, `Slot`, `TimeoutMs`…) cùng phần `Commands`/`Tags` từ bản backup sang, hoặc đặt lại công
-tắc, rồi `Restart-Service IndustrialIot.Edge`. Riêng `Host`: `install-edge.ps1` ghi `Edge__Plc__Host` vào biến môi
-trường của service, và biến này **đè** `Host` trong `appsettings.json`; muốn đổi IP PLC thì chạy lại script với
+bộ cài ghi lại `appsettings.json` mặc định (chỉ đọc). Sau khi cài lại, chép phần `Commands` từ bản backup sang, hoặc
+đặt lại công tắc, rồi `Restart-Service IndustrialIot.Edge`. `edge.settings.json` (PLC, chu kỳ đọc, tag kèm
+`Writable`) nằm trong thư mục dữ liệu nên được giữ nguyên khi gỡ không có `-RemoveData` rồi cài lại. Chưa từng lưu
+trên trang cấu hình thì PLC và tag vẫn ở `appsettings.json`: chép thêm phần `Edge:Plc` (toàn bộ: `Protocol`, `Port`,
+`CpuType`, `Rack`, `Slot`, `TimeoutMs`…) và `Tags` từ bản backup. Riêng `Host` khi chưa có `edge.settings.json`:
+`install-edge.ps1` ghi `Edge__Plc__Host` vào biến môi trường của service, và biến này **đè** `Host` trong
+`appsettings.json`; muốn đổi IP PLC thì dùng [trang cấu hình](#trang-cấu-hình-plc-và-tag) hoặc chạy lại script với
 `-PlcHost`, đừng chỉ sửa file.
 
 | Lệch cấu hình | Triệu chứng | Cách sửa |
@@ -273,8 +276,10 @@ Chép sang máy Edge: file zip đó và `deployments\.secrets\ca.pem`. Mật kh�
 
 ### 2. Chuẩn bị danh sách tag (khuyến nghị: chỉ đọc trước)
 
-Sau khi cài, danh sách tag nằm trong `C:\Program Files\IndustrialIot\Edge\appsettings.json` (mục `Edge:Tags`).
-Lần chạy đầu, để mọi tag `"Writable": false` và kiểm tra giá trị đọc được khớp với TIA Portal (chế độ Monitor)
+Sau khi cài, danh sách tag mặc định nằm trong `C:\Program Files\IndustrialIot\Edge\appsettings.json` (mục
+`Edge:Tags`). Cách dễ hơn là sửa trên [trang cấu hình](#trang-cấu-hình-plc-và-tag) `http://localhost:5080/settings`;
+từ lần lưu đầu tiên, PLC và tag nằm trong `C:\ProgramData\IndustrialIot\Edge\edge.settings.json` và
+`appsettings.json` không còn được dùng cho các mục đó. Lần chạy đầu, để mọi tag `"Writable": false` và kiểm tra giá trị đọc được khớp với TIA Portal (chế độ Monitor)
 trước khi cho phép ghi. Xem `docs/plc-setup.md` để chuẩn bị PLC (PUT/GET, tắt Optimized block access).
 
 ### 3. Cài đặt (PowerShell **Run as administrator** trên máy Edge)
@@ -305,7 +310,7 @@ Gặp lỗi giữa chừng, script tự gỡ những gì đã tạo. `-EdgeId` p
 ```powershell
 Get-Service IndustrialIot.Edge                         # Running
 Get-WinEvent -LogName Application -ProviderName IndustrialIot.Edge -MaxEvents 20 | Format-List TimeCreated, Message
-Restart-Service IndustrialIot.Edge                     # sau khi sửa appsettings.json
+Restart-Service IndustrialIot.Edge                     # sau khi sửa appsettings.json hoặc edge.settings.json bằng tay
 ```
 
 Trên máy stack: `curl -H "Authorization: Bearer $(bash deployments/scripts/get-token.sh viewer)" http://127.0.0.1:8080/api/v1/edges/line1-edge01/tags/latest`
@@ -330,6 +335,76 @@ chỉ nghe trên `localhost` — máy khác trong mạng không truy cập đư�
 Cổng 5080 đã bị chương trình khác chiếm thì Edge vẫn chạy bình thường, chỉ ghi lỗi
 `Monitor page disabled: port ... is not available` vào log — đổi `Port` rồi `Restart-Service IndustrialIot.Edge`.
 
+#### Trang cấu hình PLC và tag
+
+**http://localhost:5080/settings** (link "Cấu hình PLC và tag" trên PLC Monitor) dùng để đổi giao thức (S7 / SLMP),
+thông số PLC, chu kỳ đọc (`Poll:IntervalMs`) và danh sách tag, thử kết nối PLC (nút **Test kết nối**), kiểm tra hợp
+lệ (nút **Kiểm tra**, không cần mật khẩu), rồi lưu (nút **Lưu & áp dụng**). Edge tự áp dụng ngay
+trong process (không cần `Restart-Service`); lỗi khi khởi động với cấu hình mới thì Edge tự quay về cấu hình cũ.
+Trang cũng chỉ nghe trên `localhost` như PLC Monitor.
+
+**Đặt mật khẩu trước khi dùng** (tối thiểu 12 ký tự; lệnh hỏi hai lần, không hiện ra màn hình, không nhận mật khẩu
+trên dòng lệnh). Chưa đặt thì trang báo "chưa đặt mật khẩu settings" và khoá nút Lưu & áp dụng / Test kết nối.
+
+```powershell
+# Edge đã cài (PowerShell Run as administrator): ghi vào thư mục dữ liệu của service
+& "C:\Program Files\IndustrialIot\Edge\IndustrialIot.Edge.exe" set-settings-password --service
+# Chạy thử từ mã nguồn / Visual Studio: chạy trong thư mục src\Edge (ghi vào src\Edge\data\)
+cd src\Edge
+dotnet run -- set-settings-password
+# Thư mục khác (ví dụ cấu hình lab FX5U): --contentRoot phải là đường dẫn TUYỆT ĐỐI; đường dẫn tương đối
+# bị ghép với thư mục bin\..., không phải thư mục hiện tại. Lệnh này ghi src\Edge\data\fx5u-lab.settings-password.json
+dotnet run -- set-settings-password --contentRoot "$PWD\lab\fx5u"
+```
+
+Mỗi lần Lưu & áp dụng hoặc Test kết nối đều phải nhập mật khẩu (không có phiên đăng nhập); trang xoá ô mật khẩu sau
+mỗi lần gửi và không giữ mật khẩu.
+
+**File cấu hình:** `edge.settings.json`, nằm cạnh file buffer (`Edge:Buffer:Path`): Edge đã cài là
+`C:\ProgramData\IndustrialIot\Edge\edge.settings.json`, chạy từ Visual Studio là `src\Edge\data\edge.settings.json`.
+Bên cạnh có `edge.settings-password.json` (chỉ lưu hash PBKDF2 của mật khẩu) và, trong lúc đang áp dụng,
+`edge.settings.pending`. Khi `edge.settings.json` tồn tại:
+
+- nó là nguồn **duy nhất** của `Edge:Plc`, `Edge:Poll` và `Edge:Tags`: các mục này trong `appsettings.json` và biến
+  môi trường `Edge__Plc__Host` mà `install-edge.ps1 -PlcHost` ghi vào service đều **bị bỏ qua**;
+- các mục khác (`Commands`, `Mqtt`, `Monitor`, `Buffer`…) vẫn lấy từ `appsettings.json` / biến môi trường; file
+  chứa khoá nào khác ngoài `SchemaVersion` và `Edge:Plc`/`Poll`/`Tags` thì Edge không khởi động và log tên khoá đó;
+- gỡ cài đặt không có `-RemoveData` và cài lại đều **giữ** file này (cùng mật khẩu).
+
+**Tag được ghi (`Writable`)** không sửa được trên trang: trang hiển thị chúng bị khoá ("Được ghi"), chỉ cho xoá, và
+khi còn tag được ghi thì các ô Giao thức, Host, Port, Rack, Slot, Loại CPU cũng bị khoá. Muốn bật ghi cho một tag,
+hoặc đổi PLC khi còn tag được ghi: mở `edge.settings.json` bằng Notepad **Run as administrator**, đặt
+`"Writable": true` (kèm `Min`/`Max` nếu cần) cho tag đó, rồi `Restart-Service IndustrialIot.Edge`. Ghi xuống PLC vẫn cần
+đủ bốn công tắc ở [Chế độ read-only và cách bật ghi](#chế-độ-read-only-và-cách-bật-ghi).
+
+**Đổi `TagId`** của một tag nghĩa là Cloud coi đó là chuỗi dữ liệu **mới**; lịch sử cũ vẫn nằm dưới TagId cũ.
+
+**Khoá do sai mật khẩu:** sai 5 lần (tính chung Lưu & áp dụng và Test kết nối) thì mọi lần Lưu / Test kết nối bị từ chối trong
+60 giây, và mỗi lần sai cũng như mỗi lần khoá đều ghi vào log (Event Log khi chạy service). Đợi hết 60 giây là dùng
+lại được. Đây là rủi ro chấp nhận: ai dùng được trình duyệt trên máy Edge có thể cố tình gõ sai để khoá trang, nhưng
+không làm dừng Edge, và Administrator vẫn sửa được file trực tiếp. Quên mật khẩu thì chạy lại `set-settings-password`.
+
+**Khôi phục cấu hình gốc:** xoá `edge.settings.json` (PowerShell admin) rồi `Restart-Service IndustrialIot.Edge`; Edge
+quay về `Plc`/`Poll`/`Tags` trong `appsettings.json` và `-PlcHost` của bộ cài.
+
+**Lưu ý:** nếu cả cấu hình mới lẫn cấu hình cũ đều không khởi động được (hiếm, ví dụ thư mục dữ liệu hỏng), Edge dừng
+với exit code 1 và log "No Edge settings could be started; stopping the Edge." (Event Log khi chạy service). Service **không** tự khởi động lại
+trong trường hợp này (bộ cài không bật `sc failureflag`): sửa hoặc xoá `edge.settings.json` rồi `Start-Service IndustrialIot.Edge`.
+
+| Trang báo / mã lỗi | Nguyên nhân | Cách xử lý |
+|---|---|---|
+| "Chưa có file settings (đang dùng appsettings.json)" | Chưa lưu lần nào | Bình thường; lần Lưu đầu tiên tạo file |
+| "chưa đặt mật khẩu settings" (403 `password-not-set`) | Chưa chạy `set-settings-password`, hoặc chạy với thư mục khác | Chạy lệnh ở trên (`--service` cho Edge đã cài) |
+| 401 `wrong-password` | Sai mật khẩu | Nhập lại; sai 5 lần sẽ bị khoá 60 giây |
+| 429 `locked` | Sai mật khẩu 5 lần | Đợi hết thời gian trang báo (tối đa 60 giây) |
+| 429 `rate-limited` ("Đã test quá 10 lần trong một phút…") | Test kết nối quá 10 lần trong một phút | Đợi một chút rồi thử lại |
+| 403 `cross-site` | Yêu cầu tới từ trang khác, hoặc mở bằng địa chỉ khác `localhost` / `127.0.0.1` | Mở đúng `http://localhost:5080/settings` |
+| 415 `json-only` | Gửi bằng công cụ khác với `Content-Type` không phải `application/json` | Dùng trang, hoặc đặt đúng `Content-Type` |
+| 409 | Cấu hình đã đổi ở nơi khác (tab khác, sửa file + restart), một lần áp dụng đang chạy, hoặc một lần Test kết nối khác đang chạy | Tải lại trang rồi làm lại |
+| 400 (lỗi theo từng ô / tag) | Giá trị không hợp lệ, hoặc thay đổi bị luật tag được ghi chặn | Sửa ô được chỉ ra |
+| "Cấu hình mới không chạy được nên Edge đã quay về cấu hình trước: …" (`rolledBack`) | Cấu hình mới không khởi động được (ví dụ cổng 5080 bị chiếm, file không ghi được) | Xem Event Log / log console để biết lý do, sửa rồi lưu lại |
+| Test kết nối báo `unreachable` | Không mở được kết nối tới Host:Port trong `TimeoutMs` | Kiểm tra IP, cổng (S7: 102), cáp, firewall, PUT/GET trên PLC |
+
 ### 5. Gỡ cài đặt
 
 Script gỡ cũng nằm sẵn trong thư mục cài đặt. Nó tự đọc thư mục cần xoá từ service đã đăng ký (không nhận
@@ -344,6 +419,9 @@ Cấu hình cũ (gồm phần `Edge:Plc` và danh sách tag) được giữ lạ
 `C:\ProgramData\IndustrialIot\Edge\appsettings.backup.json`. Sau khi cài lại, chép file này đè lên
 `C:\Program Files\IndustrialIot\Edge\appsettings.json` rồi `Restart-Service IndustrialIot.Edge`. Lưu ý
 `install-edge.ps1` ghi `Edge__Plc__Host` vào biến môi trường của service, biến này đè `Host` trong `appsettings.json`.
+Khi gỡ không có `-RemoveData`, `edge.settings.json` và mật khẩu trang cấu hình cũng được giữ trong thư mục đó; khi
+file này còn, PLC và tag lấy từ nó (bỏ qua `appsettings.json` và `Edge__Plc__Host`), xem
+[Trang cấu hình PLC và tag](#trang-cấu-hình-plc-và-tag).
 
 Nếu script cài báo một thư mục `IndustrialIot` "not owned by Administrators or SYSTEM", có người đã tạo sẵn thư
 mục đó: kiểm tra nội dung, xoá nó (hoặc `takeown /f <thư mục> /a /r`) rồi cài lại. Script cố ý từ chối, vì chủ
@@ -387,8 +465,11 @@ dotnet run --project src\Edge --launch-profile IndustrialIot.Edge   # không dù
 
    Dữ liệu buffer nằm ở `src/Edge/data/` (đã có trong `.gitignore`).
 4. Bấm ▶ (**F5** có debug, **Ctrl+F5** không debug), rồi mở **http://localhost:5080/** (PLC Monitor).
-5. Sửa `src/Edge/appsettings.json` (IP PLC, danh sách tag) → **dừng** (Shift+F5) rồi chạy lại: Edge chỉ đọc cấu hình
-   lúc khởi động.
+5. Đổi IP PLC, chu kỳ đọc, danh sách tag trên **http://localhost:5080/settings** (đặt mật khẩu trước, xem
+   [Trang cấu hình PLC và tag](#trang-cấu-hình-plc-và-tag)): lưu xong Edge tự áp dụng, ghi vào
+   `src/Edge/data/edge.settings.json`. Hoặc sửa `src/Edge/appsettings.json` (chỉ có tác dụng khi chưa có file đó) →
+   **dừng** (Shift+F5) rồi chạy lại: Edge chỉ đọc `appsettings.json` lúc khởi động. Xoá `src/Edge/data/edge.settings.json`
+   để quay về `appsettings.json`.
 
 Không chạy hai Edge cùng lúc (Visual Studio + service đã cài): cùng chiếm cổng 5080 và thêm một kết nối tới PLC.
 

@@ -4,6 +4,7 @@ using IndustrialIot.Edge.Drivers;
 using IndustrialIot.Edge.Drivers.Slmp;
 using IndustrialIot.Edge.Messaging;
 using IndustrialIot.Edge.Polling;
+using IndustrialIot.Edge.Settings;
 using IndustrialIot.Shared.Common;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
@@ -31,10 +32,16 @@ internal sealed class MonitorServer(
     TelemetryStore store,
     MqttConnection mqttConnection,
     TimeProvider clock,
-    ILogger<MonitorServer> logger) : IHostedService, IAsyncDisposable
+    ILogger<MonitorServer> logger,
+    EdgeSettingsFile settingsFile,
+    EdgeRestarter? restarter = null,
+    MonitorStartPolicy? startPolicy = null,
+    SettingsService? settingsApi = null,
+    PlcConnectionTester? connectionTester = null) : IHostedService, IAsyncDisposable
 {
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
     private static readonly Lazy<string> Page = new(LoadPage);
+    private static readonly Lazy<string> SettingsPage = new(() => LoadPage("settings.html"));
 
     // DNS rebinding guard: a web page from elsewhere could resolve its own name to 127.0.0.1.
     private static readonly HashSet<string> AllowedHosts = new(StringComparer.OrdinalIgnoreCase)
@@ -52,26 +59,70 @@ internal sealed class MonitorServer(
             return;
         }
 
+        // At process start a taken port leaves the Edge running without the page. When settings are applied the old
+        // host has only just released the port: retry, then fail the start so the supervisor rolls back.
+        var policy = startPolicy ?? MonitorStartPolicy.ProcessStart;
+        var retrying = System.Diagnostics.Stopwatch.StartNew();
+        while (true)
+        {
+            var app = BuildApp(settings.Port);
+            try
+            {
+                await app.StartAsync(cancellationToken).ConfigureAwait(false);
+                _app = app;
+                logger.LogInformation("Monitor page: http://localhost:{Port}/", settings.Port);
+                return;
+            }
+            catch (IOException ex)
+            {
+                await app.DisposeAsync().ConfigureAwait(false);
+                if (retrying.Elapsed < policy.BindRetry)
+                {
+                    await Task.Delay(TimeSpan.FromMilliseconds(100), cancellationToken).ConfigureAwait(false);
+                    continue;
+                }
+
+                if (policy.FailWhenUnavailable)
+                {
+                    throw new InvalidOperationException($"Monitor port {settings.Port} is not available ({ex.Message}).", ex);
+                }
+
+                logger.LogError("Monitor page disabled: port {Port} is not available ({Reason}).", settings.Port, ex.Message);
+                return;
+            }
+            catch
+            {
+                // Cancelled or failed otherwise: never leave a half-started server holding the port.
+                await app.DisposeAsync().ConfigureAwait(false);
+                throw;
+            }
+        }
+    }
+
+    private WebApplication BuildApp(int port)
+    {
         var builder = WebApplication.CreateEmptyBuilder(new WebApplicationOptions());
-        builder.WebHost.UseKestrelCore().ConfigureKestrel(kestrel => kestrel.ListenLocalhost(settings.Port));
+        builder.WebHost.UseKestrelCore().ConfigureKestrel(kestrel => kestrel.ListenLocalhost(port));
         builder.Services.AddRoutingCore();
 
         var app = builder.Build();
         app.Use(GuardAsync);
         app.MapGet("/", () => Results.Content(Page.Value, "text/html; charset=utf-8"));
         app.MapGet("/api/status", async (CancellationToken ct) => Results.Json(await BuildStatusAsync(ct).ConfigureAwait(false), Json));
+        if (settingsApi is not null)
+        {
+            app.MapGet("/settings", () => Results.Content(SettingsPage.Value, "text/html; charset=utf-8"));
+            app.MapGet("/api/settings", (RequestDelegate)settingsApi.GetAsync);
+            app.MapPost("/api/settings/validate", (RequestDelegate)(context => settingsApi.ValidateAsync(context, port)));
+            app.MapPut("/api/settings", (RequestDelegate)(context => settingsApi.SaveAsync(context, port)));
+        }
 
-        try
+        if (connectionTester is not null)
         {
-            await app.StartAsync(cancellationToken).ConfigureAwait(false);
-            _app = app;
-            logger.LogInformation("Monitor page: http://localhost:{Port}/", settings.Port);
+            app.MapPost("/api/settings/test-connection", (RequestDelegate)(context => connectionTester.TestAsync(context, port)));
         }
-        catch (IOException ex)
-        {
-            logger.LogError("Monitor page disabled: port {Port} is not available ({Reason}).", settings.Port, ex.Message);
-            await app.DisposeAsync().ConfigureAwait(false);
-        }
+
+        return app;
     }
 
     public async Task StopAsync(CancellationToken cancellationToken)
@@ -143,7 +194,21 @@ internal sealed class MonitorServer(
             plcStatus,
             new MqttStatus(m.Host, m.Port, mqttConnection.IsConnected),
             pending,
-            tags);
+            tags,
+            SettingsApply());
+    }
+
+    private SettingsApplyStatus SettingsApply()
+    {
+        // Without a supervisor (tests, a plain AddEdgeAgent host) the running settings are simply applied.
+        var status = restarter?.Status ?? new ApplyStatus(settingsFile.Revision, null, ApplyState.Applied, null);
+        var state = status.State switch
+        {
+            ApplyState.Applying => "applying",
+            ApplyState.RolledBack => "rolledBack",
+            _ => "applied",
+        };
+        return new SettingsApplyStatus(status.Revision, status.ApplyId, state, status.Error);
     }
 
     private static Task GuardAsync(HttpContext context, Func<Task> next)
@@ -169,10 +234,12 @@ internal sealed class MonitorServer(
         _ => "uncertain",
     };
 
-    private static string LoadPage()
+    private static string LoadPage() => LoadPage("monitor.html");
+
+    private static string LoadPage(string name)
     {
-        using var stream = typeof(MonitorServer).Assembly.GetManifestResourceStream("IndustrialIot.Edge.Monitoring.monitor.html")
-            ?? throw new InvalidOperationException("Embedded monitor page is missing.");
+        using var stream = typeof(MonitorServer).Assembly.GetManifestResourceStream($"IndustrialIot.Edge.Monitoring.{name}")
+            ?? throw new InvalidOperationException($"Embedded page {name} is missing.");
         using var reader = new StreamReader(stream);
         return reader.ReadToEnd();
     }
@@ -187,7 +254,14 @@ internal sealed record MonitorStatus(
     PlcStatus Plc,
     MqttStatus Mqtt,
     long? BufferPending,
-    IReadOnlyList<TagStatus> Tags);
+    IReadOnlyList<TagStatus> Tags,
+    SettingsApplyStatus SettingsApply);
+
+/// <summary>
+/// <see cref="Revision"/>: the settings the running agent was built from. <see cref="State"/>: applying, applied or
+/// rolledBack for <see cref="ApplyId"/>; <see cref="Error"/> is a fixed message.
+/// </summary>
+internal sealed record SettingsApplyStatus(string Revision, string? ApplyId, string State, string? Error);
 
 /// <summary>
 /// <see cref="Protocol"/>: S7 or Slmp; <see cref="Rack"/>/<see cref="Slot"/> are null for Slmp.

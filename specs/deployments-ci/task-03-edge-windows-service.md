@@ -1,7 +1,6 @@
 # Task 03 — The Edge is packaged on the dev machine and runs as a Windows Service
 
-Status: blocked
-Blocker: live level not run — `powershell -NoProfile -ExecutionPolicy Bypass -File deployments/edge/verify-edge.ps1 -Live` needs an elevated PowerShell; this session is not elevated. The user runs it and shares the output (default level: 6/6 PASS, exit 0; code review PASS after three repair rounds, 2026-10-20).
+Status: done
 
 ## Outcome
 The Edge still runs from a console (`dotnet run`); `package-edge.ps1` produces a self-contained zip on the dev machine; `install-edge.ps1` installs it on a Windows machine without SDK, source or Internet as an automatically starting Windows Service that restarts on failure, with program, data and registry environment protected as D-07 states; `uninstall-edge.ps1` removes it.
@@ -47,4 +46,42 @@ The Edge still runs from a console (`dotnet run`); `package-edge.ps1` produces a
 On a failed Step or Verification Plan run: stop; do not widen scope, change the Command, or weaken a test; record observed versus expected; repair only the cited cause; after three failed rounds, stop and ask the user.
 
 ## Receipt
-<!-- Fill only after execution; see canonical form in templates. -->
+
+Verification: PASS
+Command: powershell -NoProfile -ExecutionPolicy Bypass -File deployments/edge/verify-edge.ps1 -Live
+Exit: 0
+Base: 927442f6c144893b2810cf30b14ac572eee996e8
+Head: 0d68155e4f9cfab46dea286b5e9e61e4940c51d81b7135dd5f8b323c98b75ce6
+```text
+$ powershell -NoProfile -ExecutionPolicy Bypass -File deployments/edge/verify-edge.ps1 -Live   # elevated, run by the user on main bbbfc80
+PASS VERIFY-BUILD the solution builds
+PASS VERIFY-STATIC Program.cs calls AddWindowsService; install-edge.ps1 never runs dotnet
+PASS VERIFY-PACKAGE self-contained package with exe, runtime, appsettings.json and the scripts
+PASS VERIFY-FAILFAST packaged exe exits non-zero naming Edge:EdgeId for an invalid id
+PASS VERIFY-PARSE all four scripts parse with PowerShell 5.1
+PASS VERIFY-SECRETS no password parameter; no output of a password
+When asked for the MQTT password, type anything: the broker of this test install is unreachable.
+MQTT password for verify-edge-live (deployments/.secrets/passwords/verify-edge-live.txt on the stack machine): [redacted]
+Installing the Edge 'verify-edge-live' into C:\Program Files\IndustrialIot\EdgeVerify
+Installed and started IndustrialIot.Edge (account NT SERVICE\IndustrialIot.Edge).
+Tags: edit C:\Program Files\IndustrialIot\EdgeVerify\appsettings.json (Edge:Tags; start read-only), then Restart-Service IndustrialIot.Edge.
+PASS LIVE-SERVICE automatic, virtual account, restart x3 after 5 s on failure
+PASS LIVE-ACL program (service: read/execute) and data (service: modify) folders and files: exactly SYSTEM, Administrators, the service; owner Administrators
+PASS LIVE-REGACL service key: SYSTEM/Administrators full, the service read only, nobody else; Environment is REG_MULTI_SZ with absolute paths
+PASS LIVE-RUNNING running as NT SERVICE\IndustrialIot.Edge for 10 s with broker and PLC unreachable
+Removed the service IndustrialIot.Edge.
+Kept the tag list as C:\ProgramData\IndustrialIot\EdgeVerify\appsettings.backup.json
+Removed C:\Program Files\IndustrialIot\EdgeVerify
+PASS LIVE-UNINSTALL service and program removed; tag list kept in the data folder
+Edge verification passed
+$ dotnet test IndustrialIot.sln   # controller, same tree
+Passed!  - Failed:     0, Passed:    55, Skipped:     0, Total:    55 - Shared.Tests.dll (net10.0)
+Passed!  - Failed:     0, Passed:   433, Skipped:     0, Total:   433 - Edge.Tests.dll (net10.0)
+Passed!  - Failed:     0, Passed:   143, Skipped:     0, Total:   143 - Cloud.Tests.dll (net10.0)
+Passed!  - Failed:     0, Passed:    37, Skipped:     0, Total:    37 - Deployment.Tests.dll (net10.0)
+```
+- Live level run by the user in an elevated PowerShell on 2026-10-29 (this session is not elevated); output pasted by the user, the typed throw-away password masked. The exit code was not printed: `verify-edge.ps1:242` prints "Edge verification passed." only on the `exit 0` branch (`:244` is `exit 1`).
+- The password prompt is the generic one of `install-edge.ps1`; `verify-edge-live` has no password file by design (unreachable broker).
+- `dotnet test IndustrialIot.sln` exit 0, `Skipped: 0` in all four assemblies (Oracle).
+- Code review: PASS after three repair rounds (2026-10-20, recorded with the default level); this run changed no file outside `specs/`.
+- Leftover by design: `C:\ProgramData\IndustrialIot\EdgeVerify\appsettings.backup.json` (uninstall keeps the tag list unless `-RemoveData`).

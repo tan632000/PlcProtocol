@@ -83,7 +83,7 @@ if ($dataDir -and (Test-Path -LiteralPath $settings) -and (Test-Path -LiteralPat
         if ([IO.File]::GetAttributes($backup) -band [IO.FileAttributes]::Directory) { [IO.Directory]::Delete($backup) } else { [IO.File]::Delete($backup) }
     }
     Copy-Item -LiteralPath $settings -Destination (Join-Path $dataDir 'appsettings.backup.json') -Force
-    Write-Host "Kept the tag list as $dataDir\appsettings.backup.json"
+    Write-Host "Kept the tag list as $dataDir\appsettings.backup.json (and $dataDir\edge.settings.json, if saved from the settings page)"
 }
 Remove-FolderNoFollow $installDir
 Write-Host "Removed $installDir"

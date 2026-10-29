@@ -78,7 +78,7 @@ Specs-Contract: process-first-ready-v1
 |---|---|---|---|---|---|---|
 | 01 | Cloud serves the SCADA shell anonymously; realm browser client | P1 | AC-01, AC-02 | `src/Cloud/Api/ScadaEndpoints.cs`, `deployments/keycloak/iiot-realm.json` | - | done |
 | 02 | Page logic: PKCE login, connection lifecycle, live table, trend; CI step | P1 | AC-01, AC-03, AC-04, AC-05, AC-06 | `src/Cloud/Scada/app.js`, `src/Cloud/Scada/scada-core.js`, `.github/workflows/ci.yml` | task-01-scada-shell-and-realm.md | done |
-| 03 | Smoke checks and docs; user browser check on the compose stack | P2 | AC-02, AC-07 | `deployments/scripts/smoke-test.sh`, `docs/deployment.md`, `docs/server-deploy.md` | task-02-page-login-live-trend.md | blocked |
+| 03 | Smoke checks and docs; user browser check on the compose stack | P2 | AC-02, AC-07 | `deployments/scripts/smoke-test.sh`, `docs/deployment.md`, `docs/server-deploy.md` | task-02-page-login-live-trend.md | done |
 
 ## Review log
 - Round 1 (2026-10-28, three fresh reviewers: security, failure modes, facts/scope): 29 raw findings → 15. R-01 High
@@ -99,3 +99,6 @@ Specs-Contract: process-first-ready-v1
 - Implementation (2026-10-28, task-02 code review): High — the logout form POST's redirect back to `/scada/` would be
   blocked by `form-action <idp>`. User chose to add `'self'` to `form-action` (D-01 updated; logout keeps the POST with
   `id_token_hint`).
+- GATE-DONE (2026-10-29): user accepted the feature as complete with the limitations in task-03's Receipt (no `good`
+  values or drawn trend seen in a browser without a PLC; token roles checked through Keycloak, not the browser tab;
+  smoke runs in CI only on the dev machine).

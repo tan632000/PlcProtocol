@@ -625,9 +625,21 @@ public class BrokerFixture : IAsyncLifetime, IAsyncDisposable
     /// <summary>Stops (Mosquitto saves its persistence file on SIGTERM) and starts the same container again.</summary>
     public async Task RestartAsync()
     {
+        // The container keeps its log across a restart, so the wait strategy can match the first start's "running"
+        // line before the broker listens again: wait for one more such line.
+        var started = RunningLines(await LogsAsync());
         await _container.StopAsync();
         await _container.StartAsync();
+        var deadline = Stopwatch.StartNew();
+        while (RunningLines(await LogsAsync()) <= started)
+        {
+            Assert.True(deadline.Elapsed < TimeSpan.FromSeconds(30), "the broker did not log a new start after the restart");
+            await Task.Delay(100);
+        }
     }
+
+    private static int RunningLines(string logs) =>
+        System.Text.RegularExpressions.Regex.Matches(logs, "mosquitto version .* running").Count;
 
     public async Task DisposeAsync()
     {

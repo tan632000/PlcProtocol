@@ -252,7 +252,7 @@ try {
     Start-Service -Name $ServiceName
 
     Write-Host "Installed and started $ServiceName (account $ServiceAccount)."
-    Write-Host "Tags: edit $InstallDir\appsettings.json (Edge:Tags; start read-only), then Restart-Service $ServiceName."
+    Write-Host "PLC and tags: run & '$InstallDir\IndustrialIot.Edge.exe' set-settings-password --service (as Administrator), then open http://localhost:5080/settings on this machine (start read-only)."
 }
 catch {
     Write-Host "install-edge: $($_.Exception.Message)" -ForegroundColor Red

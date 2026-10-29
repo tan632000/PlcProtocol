@@ -5,6 +5,7 @@ using IndustrialIot.Edge.Drivers.Models;
 using IndustrialIot.Edge.Messaging;
 using IndustrialIot.Edge.Monitoring;
 using IndustrialIot.Edge.Polling;
+using IndustrialIot.Edge.Settings;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Options;
 
@@ -20,6 +21,12 @@ public static class EdgeServiceCollectionExtensions
     {
         ArgumentNullException.ThrowIfNull(services);
         ArgumentNullException.ThrowIfNull(configuration);
+
+        // A settings file saved by the settings page replaces Edge:Plc, Edge:Poll and Edge:Tags; everything below
+        // binds the composed view. The content root is the host's, as for the buffer database.
+        var contentRoot = EdgeSettingsFile.ResolveContentRoot(configuration);
+        configuration = EdgeSettingsFile.Compose(configuration, contentRoot, out var settingsFile);
+        services.TryAddSingleton(settingsFile);
 
         var edgeSection = configuration.GetSection(EdgeOptions.SectionName);
 
@@ -38,6 +45,12 @@ public static class EdgeServiceCollectionExtensions
             provider.GetRequiredService<IPlcAddressSyntax>()));
 
         services.TryAddSingleton(TimeProvider.System);
+
+        // Without a supervisor (tests, a plain host) a local verifier; the supervisor registers its shared one.
+        services.TryAddSingleton<SettingsPassword>();
+        services.TryAddSingleton<SettingsService>();
+        services.TryAddSingleton<PlcTestLimiter>();
+        services.TryAddSingleton<PlcConnectionTester>();
 
         services.AddOptions<BufferOptions>().Bind(configuration.GetSection(BufferOptions.SectionName)).ValidateOnStart();
         services.TryAddEnumerable(ServiceDescriptor.Singleton<IValidateOptions<BufferOptions>, BufferOptionsValidator>());

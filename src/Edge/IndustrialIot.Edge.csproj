@@ -19,6 +19,7 @@
 
   <ItemGroup>
     <EmbeddedResource Include="Monitoring\monitor.html" LogicalName="IndustrialIot.Edge.Monitoring.monitor.html" />
+    <EmbeddedResource Include="Monitoring\settings.html" LogicalName="IndustrialIot.Edge.Monitoring.settings.html" />
   </ItemGroup>
 
   <ItemGroup>

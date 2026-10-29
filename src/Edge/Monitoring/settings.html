@@ -1,0 +1,481 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cấu hình PLC</title>
+<style>
+  :root {
+    --bg: #f4f5f7; --panel: #ffffff; --text: #1d2330; --muted: #667085; --border: #dfe3ea;
+    --ok: #1a7f37; --ok-bg: #e6f4ea; --bad: #c62828; --bad-bg: #fdecea; --warn: #9a6700; --warn-bg: #fff4d6;
+    --idle: #475467; --idle-bg: #eef0f3; --head: #f8f9fb; --accent: #1f5fbf;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #12151b; --panel: #1b1f27; --text: #e6e9ef; --muted: #98a2b3; --border: #2c323d;
+      --ok: #4ac26b; --ok-bg: #12301c; --bad: #ff7b72; --bad-bg: #3a1614; --warn: #e3b341; --warn-bg: #3a2d0c;
+      --idle: #b0b8c4; --idle-bg: #262b34; --head: #20252e; --accent: #6ea8fe;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 14px/1.45 "Segoe UI", system-ui, -apple-system, sans-serif; }
+  main { max-width: 1100px; margin: 0 auto; padding: 20px 16px 40px; }
+  header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 16px; margin-bottom: 16px; }
+  h1 { font-size: 20px; margin: 0; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 0 0 10px; }
+  a { color: var(--accent); }
+  .muted { color: var(--muted); }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 14px; margin-bottom: 14px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px 14px; }
+  label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+  input, select { font: inherit; color: var(--text); background: var(--panel); border: 1px solid var(--border);
+                  border-radius: 6px; padding: 6px 8px; min-width: 0; }
+  input:disabled, select:disabled { background: var(--idle-bg); color: var(--muted); }
+  .hidden { display: none !important; }
+  .table-wrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; min-width: 720px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+  th { background: var(--head); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+  td input, td select { width: 100%; }
+  tr.invalid td { background: var(--bad-bg); }
+  .badge { display: inline-block; padding: 2px 10px; border-radius: 999px; font-weight: 600; font-size: 12px; }
+  .ok { color: var(--ok); background: var(--ok-bg); }
+  .bad { color: var(--bad); background: var(--bad-bg); }
+  .warn { color: var(--warn); background: var(--warn-bg); }
+  .idle { color: var(--idle); background: var(--idle-bg); }
+  .message { padding: 10px 14px; border-radius: 8px; margin-bottom: 14px; }
+  .actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; }
+  button { font: inherit; border: 1px solid var(--border); background: var(--panel); color: var(--text);
+           border-radius: 6px; padding: 7px 14px; cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  ul.errors { margin: 6px 0 0; padding-left: 18px; }
+  code { font-family: Consolas, "Cascadia Mono", monospace; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Cấu hình PLC</h1>
+    <a href="/">← Về trang giám sát</a>
+    <span class="muted" id="source"></span>
+  </header>
+
+  <div id="message" class="message idle" role="status" aria-live="polite">Đang tải cấu hình…</div>
+
+  <div id="noPassword" class="message warn hidden">
+    Chưa đặt mật khẩu settings nên chưa lưu hay test được. Trên máy Edge, chạy với quyền Administrator:
+    <code>IndustrialIot.Edge.exe set-settings-password --service</code>
+    (chạy thử bằng <code>dotnet run</code> thì bỏ <code>--service</code>), rồi tải lại trang.
+  </div>
+
+  <section class="panel">
+    <h2>Kết nối PLC</h2>
+    <div id="plcLocked" class="message warn hidden">
+      Đang có tag được phép ghi nên không đổi được PLC (lệnh ghi từ Cloud sẽ rơi sang PLC khác). Xoá các tag đó trước,
+      hoặc người quản trị sửa file settings.
+    </div>
+    <div class="grid">
+      <label>Giao thức
+        <select id="protocol">
+          <option value="S7">Siemens S7</option>
+          <option value="Slmp">Mitsubishi SLMP</option>
+        </select>
+      </label>
+      <label>Địa chỉ PLC (Host)<input id="host" autocomplete="off"></label>
+      <label>Cổng (Port)<input id="port" type="number" min="1" max="65535"></label>
+      <label class="s7only">Rack<input id="rack" type="number" min="0" max="7"></label>
+      <label class="s7only">Slot<input id="slot" type="number" min="0" max="31"></label>
+      <label class="s7only">Loại CPU
+        <select id="cpuType">
+          <option value="S71200">S7-1200</option>
+          <option value="S71500">S7-1500</option>
+        </select>
+      </label>
+      <label>Timeout (ms)<input id="timeoutMs" type="number" min="1" max="60000"></label>
+      <label>Chu kỳ đọc (ms)<input id="intervalMs" type="number" min="100" max="3600000"></label>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>Danh sách tag</h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Tag ID</th><th>Địa chỉ</th><th>Kiểu dữ liệu</th><th>Ghi</th><th></th></tr></thead>
+        <tbody id="tags"></tbody>
+      </table>
+    </div>
+    <p class="actions"><button id="addTag" type="button">+ Thêm tag</button></p>
+    <!-- The DataTypes the Edge knows (PlcDataType); each row's select is a copy of this one. -->
+    <select id="dataTypeChoices" hidden>
+      <option value="Bool">Bool</option>
+      <option value="Byte">Byte</option>
+      <option value="Word">Word</option>
+      <option value="Int">Int</option>
+      <option value="DWord">DWord</option>
+      <option value="DInt">DInt</option>
+      <option value="Real">Real</option>
+    </select>
+  </section>
+
+  <section class="panel">
+    <div class="actions">
+      <label>Mật khẩu settings<input id="password" type="password" autocomplete="new-password"></label>
+      <button id="validate" type="button">Kiểm tra</button>
+      <button id="test" type="button">Test kết nối</button>
+      <button id="save" type="button" class="primary">Lưu &amp; áp dụng</button>
+      <button id="reload" type="button">Tải lại</button>
+    </div>
+  </section>
+</main>
+
+<script>
+  "use strict";
+  const $ = (id) => document.getElementById(id);
+  const APPLY_WAIT_MS = 60000;
+
+  let current = null;   // the last GET /api/settings
+  let busy = false;
+
+  function show(text, cls, details) {
+    const box = $("message");
+    box.className = "message " + cls;
+    box.textContent = text;
+    if (details && details.length) {
+      const list = document.createElement("ul");
+      list.className = "errors";
+      for (const line of details) {
+        const item = document.createElement("li");
+        item.textContent = line;
+        list.appendChild(item);
+      }
+      box.appendChild(list);
+    }
+  }
+
+  function setBusy(value) {
+    busy = value;
+    const passwordSet = current && current.passwordSet;
+    $("save").disabled = value || !passwordSet;
+    $("test").disabled = value || !passwordSet;
+    $("validate").disabled = value;
+    $("reload").disabled = value;
+    // Edits made while a save is applying would be overwritten by the reload that follows.
+    $("addTag").disabled = value;
+    for (const el of $("tags").querySelectorAll("input, select, button")) {
+      el.disabled = value || el.dataset.locked === "true";
+    }
+  }
+
+  function writableKept() {
+    return [...$("tags").children].some((tr) => tr.dataset.writable === "true");
+  }
+
+  function applyLocks() {
+    const locked = writableKept();
+    for (const id of ["protocol", "host", "port", "rack", "slot", "cpuType"]) $(id).disabled = locked;
+    $("plcLocked").classList.toggle("hidden", !locked);
+    const s7 = $("protocol").value === "S7";
+    for (const el of document.querySelectorAll(".s7only")) el.classList.toggle("hidden", !s7);
+  }
+
+  function input(value, placeholder) {
+    const el = document.createElement("input");
+    el.value = value == null ? "" : String(value);
+    el.placeholder = placeholder;
+    el.autocomplete = "off";
+    return el;
+  }
+
+  function addRow(tag) {
+    const tr = document.createElement("tr");
+    const writable = !!(tag && tag.writable);
+    tr.dataset.writable = String(writable);
+    // Min/Max go back exactly as received: a writable tag stays writable only when sent back unchanged.
+    tr.dataset.min = tag && tag.min != null ? String(tag.min) : "";
+    tr.dataset.max = tag && tag.max != null ? String(tag.max) : "";
+
+    const tagId = input(tag && tag.tagId, "VD: Line1.Speed");
+    const address = input(tag && tag.address, "VD: DB1.DBW2 hoặc D100");
+    const dataType = $("dataTypeChoices").cloneNode(true);
+    dataType.removeAttribute("id");
+    dataType.hidden = false;
+    dataType.value = (tag && tag.dataType) || "Int";
+
+    const cells = [tagId, address, dataType].map((el) => {
+      const td = document.createElement("td");
+      if (writable) {
+        el.disabled = true;
+        el.dataset.locked = "true";
+      }
+      td.appendChild(el);
+      return td;
+    });
+
+    const writeCell = document.createElement("td");
+    const badge = document.createElement("span");
+    badge.className = "badge " + (writable ? "warn" : "idle");
+    badge.textContent = writable ? "Được ghi" : "Chỉ đọc";
+    writeCell.appendChild(badge);
+    if (writable) {
+      const hint = document.createElement("div");
+      hint.className = "muted";
+      hint.textContent = "Chỉ xoá được; sửa trong file settings với quyền Admin.";
+      writeCell.appendChild(hint);
+    }
+
+    const removeCell = document.createElement("td");
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.textContent = "Xoá";
+    remove.addEventListener("click", () => { tr.remove(); applyLocks(); });
+    removeCell.appendChild(remove);
+
+    tr.append(...cells, writeCell, removeCell);
+    $("tags").appendChild(tr);
+  }
+
+  function fill(settings) {
+    const plc = settings.plc;
+    $("protocol").value = plc.protocol;
+    $("host").value = plc.host || "";
+    $("port").value = plc.port == null ? "" : plc.port;
+    $("rack").value = plc.rack == null ? "" : plc.rack;
+    $("slot").value = plc.slot == null ? "" : plc.slot;
+    $("cpuType").value = plc.cpuType || "S71200";
+    $("timeoutMs").value = plc.timeoutMs;
+    $("intervalMs").value = settings.poll.intervalMs;
+    $("tags").replaceChildren();
+    for (const tag of settings.tags) addRow(tag);
+    applyLocks();
+  }
+
+  function number(id) {
+    const text = $(id).value.trim();
+    return text === "" ? undefined : Number(text);
+  }
+
+  function collectPlc() {
+    // Locked by kept writable tags: send the running PLC back exactly as GET returned it (the server compares it).
+    if (writableKept() && current) {
+      const p = current.settings.plc;
+      const locked = { Protocol: p.protocol, Host: p.host, Port: p.port, TimeoutMs: number("timeoutMs") };
+      if (p.protocol === "S7") Object.assign(locked, { Rack: p.rack, Slot: p.slot, CpuType: p.cpuType });
+      for (const key of Object.keys(locked)) if (locked[key] === undefined || locked[key] === null) delete locked[key];
+      return locked;
+    }
+
+    const plc = { Protocol: $("protocol").value, Host: $("host").value.trim(), Port: number("port"), TimeoutMs: number("timeoutMs") };
+    if (plc.Protocol === "S7") {
+      plc.Rack = number("rack");
+      plc.Slot = number("slot");
+      plc.CpuType = $("cpuType").value;
+    }
+    for (const key of Object.keys(plc)) if (plc[key] === undefined) delete plc[key];
+    return plc;
+  }
+
+  function collectSettings() {
+    const tags = [...$("tags").children].map((tr) => {
+      const [tagId, address, dataType] = tr.querySelectorAll("input, select");
+      const tag = { TagId: tagId.value.trim(), Address: address.value.trim(), DataType: dataType.value, Writable: false };
+      if (tr.dataset.min !== "") tag.Min = Number(tr.dataset.min);
+      if (tr.dataset.max !== "") tag.Max = Number(tr.dataset.max);
+      return tag;
+    });
+    const poll = {};
+    if (number("intervalMs") !== undefined) poll.IntervalMs = number("intervalMs");
+    return { Plc: collectPlc(), Poll: poll, Tags: tags };
+  }
+
+  function takePassword() {
+    const value = $("password").value;
+    $("password").value = "";
+    return value;
+  }
+
+  function markRows(errors) {
+    const rows = [...$("tags").children];
+    for (const tr of rows) tr.classList.remove("invalid");
+    for (const e of errors) {
+      const match = /^Edge:Tags:(\d+)/.exec(e.path || "");
+      if (match && rows[Number(match[1])]) rows[Number(match[1])].classList.add("invalid");
+    }
+  }
+
+  function errorLines(errors) {
+    return errors.map((e) => {
+      const match = /^Edge:Tags:(\d+)/.exec(e.path || "");
+      const where = match ? `Tag dòng ${Number(match[1]) + 1}` : (e.path || "Cấu hình");
+      return `${where}: ${e.message}`;
+    });
+  }
+
+  async function send(path, method, body, timeoutMs) {
+    const abort = new AbortController();
+    const timer = setTimeout(() => abort.abort(), timeoutMs || 15000);
+    try {
+      const response = await fetch(path, {
+        method,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        signal: abort.signal,
+        cache: "no-store",
+      });
+      let json = {};
+      try { json = await response.json(); } catch { /* empty body */ }
+      return { status: response.status, json };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  function explain(status, json) {
+    switch (status) {
+      case 401: return ["Sai mật khẩu settings.", "bad"];
+      case 403: return json.error === "password-not-set"
+        ? ["Chưa đặt mật khẩu settings (xem hướng dẫn phía trên).", "warn"]
+        : ["Yêu cầu bị từ chối: chỉ gửi được từ chính trang này trên máy Edge.", "bad"];
+      case 409: return json.error === "stale-revision"
+        ? ["Cấu hình đã bị thay đổi ở nơi khác. Bấm “Tải lại” để lấy bản mới rồi sửa lại.", "warn"]
+        : ["Đang có một lần lưu hoặc test khác chạy. Thử lại sau giây lát.", "warn"];
+      case 413: return ["Cấu hình quá lớn (tối đa 1 MB).", "bad"];
+      case 415: return ["Yêu cầu không đúng định dạng.", "bad"];
+      case 429: return json.retryAfterSeconds
+        ? [`Nhập sai mật khẩu quá nhiều lần. Thử lại sau ${json.retryAfterSeconds} giây.`, "bad"]
+        : ["Đã test quá 10 lần trong một phút. Đợi một chút rồi thử lại.", "warn"];
+      default: return [`Lỗi không mong đợi (HTTP ${status}).`, "bad"];
+    }
+  }
+
+  async function getJson(path) {
+    const abort = new AbortController();
+    const timer = setTimeout(() => abort.abort(), 5000);
+    try {
+      const response = await fetch(path, { cache: "no-store", signal: abort.signal });
+      if (!response.ok) throw new Error("HTTP " + response.status);
+      return await response.json();
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** Loads the settings; returns false (and says why) when it could not. */
+  async function load() {
+    setBusy(true);
+    show("Đang tải cấu hình…", "idle");
+    try {
+      current = await getJson("/api/settings");
+      fill(current.settings);
+      $("source").textContent = current.source === "file"
+        ? "Đang dùng file settings đã lưu"
+        : "Chưa có file settings (đang dùng appsettings.json)";
+      $("noPassword").classList.toggle("hidden", current.passwordSet);
+      show("Sửa cấu hình rồi bấm “Lưu & áp dụng”. Edge sẽ khởi động lại (đọc PLC, gửi Cloud và trang này) trong vài giây.", "idle");
+      return true;
+    } catch (err) {
+      show("Không tải được cấu hình (" + err.message + "). Phần mềm Edge có đang chạy không?", "bad");
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function validate() {
+    setBusy(true);
+    try {
+      const { status, json } = await send("/api/settings/validate", "POST", { settings: collectSettings() });
+      if (status !== 200) return show(...explain(status, json));
+      markRows(json.errors);
+      if (json.ok) show("Cấu hình hợp lệ.", "ok");
+      else show("Cấu hình chưa hợp lệ:", "bad", errorLines(json.errors));
+    } catch (err) {
+      show("Không kiểm tra được (" + err.message + ").", "bad");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function waitForApply(applyId) {
+    const deadline = Date.now() + APPLY_WAIT_MS;
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      try {
+        const apply = (await getJson("/api/status")).settingsApply;
+        if (apply && apply.applyId === applyId && apply.state !== "applying") return apply;
+      } catch {
+        // The page server restarts with the Edge; keep asking.
+      }
+    }
+    return null;
+  }
+
+  function needPassword() {
+    // An empty password would count as a wrong one toward the lockout: never send it.
+    if ($("password").value !== "") return false;
+    show("Nhập mật khẩu settings trước.", "warn");
+    $("password").focus();
+    return true;
+  }
+
+  async function save() {
+    if (needPassword()) return;
+    const password = takePassword();
+    setBusy(true);
+    try {
+      const { status, json } = await send("/api/settings", "PUT",
+        { revision: current.revision, password, settings: collectSettings() });
+      if (status === 400) {
+        markRows(json.errors || []);
+        return show("Không lưu: cấu hình chưa hợp lệ.", "bad", errorLines(json.errors || []));
+      }
+      if (status !== 202) return show(...explain(status, json));
+
+      markRows([]);
+      show("Đã lưu. Edge đang áp dụng cấu hình mới…", "warn");
+      const apply = await waitForApply(json.applyId);
+      if (apply === null) {
+        show("Chưa thấy Edge áp dụng xong sau 60 giây. Kiểm tra trang giám sát hoặc log của Edge.", "bad");
+      } else if (apply.state === "applied") {
+        if (await load()) show("Đã áp dụng cấu hình mới.", "ok");
+      } else if (await load()) {
+        show("Cấu hình mới không chạy được nên Edge đã quay về cấu hình trước: " + (apply.error || ""), "bad");
+      }
+    } catch (err) {
+      show("Không lưu được (" + err.message + ").", "bad");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function testConnection() {
+    if (needPassword()) return;
+    const password = takePassword();
+    const plc = collectPlc();
+    setBusy(true);
+    show(`Đang test kết nối ${plc.Host}:${plc.Port || ""}…`, "idle");
+    try {
+      // The Edge waits up to the PLC timeout; give the request a little more.
+      const { status, json } = await send("/api/settings/test-connection", "POST", { password, plc }, (plc.TimeoutMs || 3000) + 5000);
+      if (status === 400) return show("Thông số PLC chưa hợp lệ:", "bad", errorLines(json.errors || []));
+      if (status !== 200) return show(...explain(status, json));
+      if (json.result === "ok") show(`Kết nối được tới PLC (${json.elapsedMs} ms).`, "ok");
+      else show(`Không kết nối được tới PLC (${json.elapsedMs} ms). Kiểm tra địa chỉ, cổng, dây mạng và PLC.`, "bad");
+    } catch (err) {
+      show("Không test được (" + (err.name === "AbortError" ? "hết thời gian chờ" : err.message) + ").", "bad");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  $("protocol").addEventListener("change", applyLocks);
+  $("addTag").addEventListener("click", () => addRow(null));
+  $("validate").addEventListener("click", () => { if (!busy) validate(); });
+  $("save").addEventListener("click", () => { if (!busy) save(); });
+  $("test").addEventListener("click", () => { if (!busy) testConnection(); });
+  $("reload").addEventListener("click", () => { if (!busy) load(); });
+  load();
+</script>
+</body>
+</html>

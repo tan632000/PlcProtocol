@@ -1,7 +1,6 @@
 # Task 03 — Smoke checks and docs; a Viewer uses the page on the compose stack
 
-Status: blocked
-Blocker: `bash deployments/scripts/smoke-test.sh` exits 2 on the dev machine (port 8080 held by Windows http.sys, PID 4); per the user (2026-10-28) it runs in CI on the pull request instead, and the browser check runs on the trial stack at port 8090 (now in the realm). Waiting for that CI run and the user's browser check.
+Status: done
 
 ## Outcome
 The smoke test proves on a fresh compose stack that the page is served and that Keycloak refuses `iiot-scada` a
@@ -65,3 +64,29 @@ logs in as `viewer` in a browser and sees rows keep updating for more than 6 min
 On a failed Step or Verification Plan run: stop; do not widen scope, change the Command, or weaken a test; record observed versus expected; repair only the cited cause; after three failed rounds, stop and ask the user.
 
 ## Receipt
+
+Verification: PASS
+Command: bash deployments/scripts/smoke-test.sh
+Exit: 0
+Base: 1f88343f9a04911635220c8479c77c0afd785cec
+Head: fc16b52cab7c4a5afea86e49551e520e765ed1e4593bb2544fbfff7328c6fedc
+```text
+$ bash deployments/scripts/smoke-test.sh   # CI run 40664556749, job smoke (122735665318), head 99953c82a751b496691ab2c0b53ae6fb45fc4d33, conclusion success
+PASS SMOKE-00 static: per-file secret mounts, no ca.key, digests everywhere, .dockerignore, no password on argv
+PASS SMOKE-01 /health/ready 200
+PASS SMOKE-02 no token -> 401
+PASS SMOKE-03 viewer token -> 200 with smoke-edge (labelled smoke-edge)
+PASS SMOKE-04 viewer POST -> 404 (read-only default)
+PASS SMOKE-05 operator POST -> 404 (read-only default)
+PASS SMOKE-06 no private key or generated secret in any image layer
+PASS SMOKE-08 /scada/ without a token -> 200 with the CSP
+PASS SMOKE-09 /scada/config -> iiot-scada at https://keycloak:8443/realms/iiot
+PASS SMOKE-10 iiot-scada password grant -> 400 unauthorized_client (iiot-cli control -> 200)
+PASS SMOKE-07 repository tree unchanged
+```
+- Where it ran: the CI `smoke` job, as decided by the user; locally the script exits 2 because Windows http.sys holds port 8080. Since 99953c8 only `docs/` and `specs/` changed (`git diff --quiet 99953c8 -- deployments/scripts/smoke-test.sh deployments/compose.yaml deployments/keycloak src` exit 0), so the smoke inputs are the ones CI ran.
+- Live (user, 2026-10-29, trial stack at http://localhost:8090/scada/, Edge from Visual Studio with profile "PLC + local broker", no PLC reachable): `viewer` logged in through Keycloak; the "Không nhận dữ liệu mới" banner cleared and row timestamps kept advancing after more than 6 minutes; the 15 min trend showed "Không có mẫu hợp lệ trong khoảng này" (every sample is `bad` without a PLC, drawn as gaps by design); logout returned without a CSP error; `operator` logged in and saw the same table, no chart for the same reason. Before that the user hit `/scada` 401 (Cloud container from an image older than 846187b, fixed by `up -d --build --force-recreate keycloak cloud`) and `DNS_PROBE_FINISHED_NXDOMAIN` (hosts line missing); both are now troubleshooting rows in `docs/deployment.md`.
+- AC-02 live level: the user could not copy a full token from devtools, so the controller checked the mapping in Keycloak instead: `generate-example-access-token` for client `iiot-scada` gives `roles=["Viewer"]` for both `operator` and `viewer` (admin password read from file, no token printed); and a real PKCE login replayed with curl for both users reached `GET /api/v1/edges` 200 and `.../tags/latest` 200 (21 tags). This proves the realm mapping and the Cloud side, not the token held by the user's browser tab.
+- Issuer probe: a token requested via `https://127.0.0.1:8443` also carries `iss=https://keycloak:8443/realms/iiot`; with `--cacert ca.pem` the 127.0.0.1 TLS handshake fails (certificate name). The docs now say the hosts line is for DNS/TLS, not the issuer.
+- Review (code-auditor, fresh context): first PASS_WITH_WARNINGS — Medium: docs blamed a missing hosts line for issuer/401 errors; the realm reload command dropped `IIOT_API_PORT=8090`. Repair round 1 fixed both plus Low 1 (reconnect delays), Low 3 (smoke on http.sys machines), Low 4 (server tunnel needs the CA). Re-review: PASS, 0 Critical/High/Medium. Left as is by the controller: `docs/deployment.md:65` says 127.0.0.1:8443 is for `get-token.sh` (pre-existing), the clock-skew wording, `app.js:117` mentioning the hosts file (task-02), the two missing page states in the table, and the duplicated curl digest.
+- Final checks on this tree: `node --test tests/scada/scada-core.test.mjs` 40/40; `dotnet test tests/Cloud.Tests` 143/143; `ScadaRealmTests` 5/5.

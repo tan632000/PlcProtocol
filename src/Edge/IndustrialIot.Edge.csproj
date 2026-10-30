@@ -25,6 +25,8 @@
   <ItemGroup>
     <!-- Lab settings for live PLC checks (VS profile "FX5U test"); never shipped to customers. -->
     <Content Update="lab\**" CopyToOutputDirectory="Never" CopyToPublishDirectory="Never" />
+    <!-- Dev buffer, settings and settings-password files written at run time; never shipped. -->
+    <Content Update="data\**" CopyToOutputDirectory="Never" CopyToPublishDirectory="Never" />
   </ItemGroup>
 
   <ItemGroup>

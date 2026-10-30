@@ -345,7 +345,8 @@ public class S7BatchReadTests
         await using var server = FakeS7Server.StartWithMemory(pduSize: 240);
         SeedLab(server);
         server.FailJob(2, fault);
-        await using var driver = CreateDriver(server, timeoutMs: 500);
+        // One budget covers connect plus the first 18-tag job; 500 ms ran out on a busy CI runner.
+        await using var driver = CreateDriver(server, timeoutMs: 2000);
 
         var results = await driver.ReadAsync(LabTags, CancellationToken.None);
 

@@ -41,6 +41,23 @@ public sealed class LatestValueRow
     public required long Sequence { get; set; }
 }
 
+/// <summary>
+/// The latest complete inventory round of one Edge: its PLCs and their tags (<c>InventoryDocument</c> as JSON).
+/// <see cref="BootId"/> and <see cref="Round"/> order rounds; <see cref="ReceivedUtc"/> (Cloud clock) decides staleness.
+/// </summary>
+public sealed class EdgeInventoryRow
+{
+    public required string EdgeId { get; set; }
+
+    public required Guid BootId { get; set; }
+
+    public required long Round { get; set; }
+
+    public required DateTimeOffset ReceivedUtc { get; set; }
+
+    public required string Document { get; set; }
+}
+
 /// <summary>A command issued through the API, with its delivery and Edge outcome.</summary>
 public sealed class CommandRow
 {

@@ -44,7 +44,7 @@ public sealed class CloudMqttConnection : BackgroundService
     private readonly ILogger<CloudMqttConnection> _logger;
     private readonly X509Certificate2? _trustedCa;
     private readonly IMqttClient _client;
-    private readonly List<(string Filter, Func<MqttApplicationMessage, CancellationToken, Task> Handler)> _handlers = [];
+    private readonly List<(string Filter, Func<MqttApplicationMessage, CancellationToken, Task> Handler, MqttQualityOfServiceLevel Qos)> _handlers = [];
     private readonly List<string> _retired = [];
     private readonly Lock _registration = new();
 
@@ -85,9 +85,19 @@ public sealed class CloudMqttConnection : BackgroundService
     /// <summary>
     /// Registers the handler for a topic filter (<c>+</c> allowed). Must happen before the host has started,
     /// so the first connection already holds every subscription and no queued message arrives without a handler.
+    /// <paramref name="qos"/> 1 (default) has the broker queue messages while the Cloud is offline; 0 for messages a
+    /// later one replaces, so they never occupy that queue. The connection fails unless the broker grants exactly it.
     /// </summary>
-    public void RegisterSubscription(string topicFilter, Func<MqttApplicationMessage, CancellationToken, Task> handler)
+    public void RegisterSubscription(
+        string topicFilter,
+        Func<MqttApplicationMessage, CancellationToken, Task> handler,
+        MqttQualityOfServiceLevel qos = MqttQualityOfServiceLevel.AtLeastOnce)
     {
+        if (qos is not (MqttQualityOfServiceLevel.AtMostOnce or MqttQualityOfServiceLevel.AtLeastOnce))
+        {
+            throw new ArgumentOutOfRangeException(nameof(qos), "Only QoS 0 and 1 are used.");
+        }
+
         ArgumentException.ThrowIfNullOrEmpty(topicFilter);
         ArgumentNullException.ThrowIfNull(handler);
         lock (_registration)
@@ -103,7 +113,7 @@ public sealed class CloudMqttConnection : BackgroundService
                 throw new InvalidOperationException($"A handler for topic filter '{topicFilter}' is already registered.");
             }
 
-            _handlers.Add((topicFilter, handler));
+            _handlers.Add((topicFilter, handler, qos));
         }
     }
 
@@ -294,19 +304,20 @@ public sealed class CloudMqttConnection : BackgroundService
 
         try
         {
-            if (_handlers.Count > 0)
+            // One SUBSCRIBE per QoS: every filter of a packet expects the same grant, whatever order the result items take.
+            foreach (var group in _handlers.GroupBy(h => h.Qos))
             {
                 var subscribe = new MqttClientSubscribeOptionsBuilder();
-                foreach (var (filter, _) in _handlers)
+                foreach (var (filter, _, qos) in group)
                 {
                     subscribe.WithTopicFilter(new MqttTopicFilterBuilder()
                         .WithTopic(filter)
-                        .WithAtLeastOnceQoS()
+                        .WithQualityOfServiceLevel(qos)
                         .WithRetainHandling(MqttRetainHandling.DoNotSendOnSubscribe));
                 }
 
                 var granted = await _client.SubscribeAsync(subscribe.Build(), ct).ConfigureAwait(false);
-                var refused = granted.Items.Where(i => i.ResultCode != MqttClientSubscribeResultCode.GrantedQoS1).ToList();
+                var refused = granted.Items.Where(i => i.ResultCode != Granted(group.Key)).ToList();
                 if (refused.Count > 0)
                 {
                     throw new InvalidOperationException(
@@ -478,4 +489,7 @@ public sealed class CloudMqttConnection : BackgroundService
     }
 
     private static TaskCompletionSource NewSignal() => new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    private static MqttClientSubscribeResultCode Granted(MqttQualityOfServiceLevel qos) =>
+        qos == MqttQualityOfServiceLevel.AtMostOnce ? MqttClientSubscribeResultCode.GrantedQoS0 : MqttClientSubscribeResultCode.GrantedQoS1;
 }

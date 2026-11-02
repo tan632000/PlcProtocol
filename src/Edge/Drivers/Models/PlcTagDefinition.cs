@@ -25,4 +25,10 @@ public sealed record PlcTagDefinition
 
     /// <summary>Characters of a <see cref="PlcDataType.String"/> tag; required for String and only for String.</summary>
     public int? Length { get; init; }
+
+    /// <summary>The tag's name within its device (<c>Edge:Channels</c>); the TagId itself on a single-PLC Edge.</summary>
+    public string? Name { get; init; }
+
+    /// <summary>Free text from <c>Edge:Channels</c>; reported in the inventory, never used to read or write.</summary>
+    public string? Description { get; init; }
 }

@@ -84,6 +84,8 @@ public static class EdgeDeviceResolver
                         Min = tag.Min,
                         Max = tag.Max,
                         Length = tag.Length,
+                        Name = tag.Name,
+                        Description = tag.Description,
                     };
                 }).ToArray();
 
@@ -113,7 +115,10 @@ public static class EdgeDeviceResolver
         var plc = configuration.GetSection(PlcProtocolOptions.SectionName);
         var interval = (configuration.GetSection(PollOptions.SectionName).Get<PollOptions>() ?? new PollOptions()).IntervalMs;
         var writes = bool.TryParse(configuration[$"{CommandsOptions.SectionName}:Enabled"], out var enabled) && enabled;
-        var tags = (configuration.GetSection(EdgeChannelsOptions.SectionName).Get<PlcTagCatalogOptions>() ?? new PlcTagCatalogOptions()).Tags ?? [];
+        // A single-PLC tag is named by its TagId and has no description, whatever extra keys the file holds.
+        var tags = ((configuration.GetSection(EdgeChannelsOptions.SectionName).Get<PlcTagCatalogOptions>() ?? new PlcTagCatalogOptions()).Tags ?? [])
+            .Select(tag => tag with { Name = tag.TagId, Description = null })
+            .ToArray();
 
         ResolvedDevice device;
         if (protocol == PlcProtocol.Slmp)

@@ -103,6 +103,35 @@ namespace IndustrialIot.Cloud.Data.Migrations
                     b.ToTable("commands", (string)null);
                 });
 
+            modelBuilder.Entity("IndustrialIot.Cloud.Data.EdgeInventoryRow", b =>
+                {
+                    b.Property<string>("EdgeId")
+                        .HasColumnType("text")
+                        .HasColumnName("edge_id");
+
+                    b.Property<Guid>("BootId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("boot_id");
+
+                    b.Property<string>("Document")
+                        .IsRequired()
+                        .HasColumnType("jsonb")
+                        .HasColumnName("document");
+
+                    b.Property<DateTimeOffset>("ReceivedUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("received_utc");
+
+                    b.Property<long>("Round")
+                        .HasColumnType("bigint")
+                        .HasColumnName("round");
+
+                    b.HasKey("EdgeId")
+                        .HasName("pk_edge_inventory");
+
+                    b.ToTable("edge_inventory", (string)null);
+                });
+
             modelBuilder.Entity("IndustrialIot.Cloud.Data.LatestValueRow", b =>
                 {
                     b.Property<string>("EdgeId")

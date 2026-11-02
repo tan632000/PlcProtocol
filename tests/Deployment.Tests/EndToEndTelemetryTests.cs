@@ -290,28 +290,6 @@ public sealed class EndToEndTelemetryTests(ITestOutputHelper output)
         }
     }
 
-    /// <summary>Gives every device of the Edge a simulated PLC.</summary>
-    private sealed class SimulatedPlcFactory : IPlcDriverFactory
-    {
-        public IPlcDriver Create(ResolvedDevice device) => new SimulatedPlc();
-    }
-
-    /// <summary>A PLC whose every tag reads a changing Int.</summary>
-    private sealed class SimulatedPlc : IPlcDriver
-    {
-        private int _reads;
-
-        public Task<IReadOnlyList<PlcReadResult>> ReadAsync(IReadOnlyList<ResolvedTag> tags, CancellationToken ct) =>
-            SequentialBatchReader.ReadAsync(
-                tags,
-                (_, _) => Task.FromResult<object>((short)(Interlocked.Increment(ref _reads) % short.MaxValue)),
-                ct);
-
-        public Task WriteAsync(IPlcAddress address, PlcDataType type, object value, CancellationToken ct) => Task.CompletedTask;
-
-        public Task<bool> IsReachableAsync(CancellationToken ct) => Task.FromResult(true);
-    }
-
     /// <summary>Mosquitto with the repository's configuration except a smaller per-client queue.</summary>
     private sealed class CappedBroker : IAsyncDisposable
     {

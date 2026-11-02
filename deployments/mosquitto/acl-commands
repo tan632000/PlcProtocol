@@ -2,11 +2,13 @@
 # and also enable Edge:Commands:Enabled, Cloud:Commands:Enabled and a Writable tag. Otherwise identical to acl.
 # Anything not granted here is denied, including #, $SYS/# and $share/...
 
-# The Cloud: receives every Edge's telemetry and results, and is the only identity that sends commands
+# The Cloud: receives every Edge's telemetry, results and inventory, and is the only identity that sends commands
 # and telemetry acks (an ack makes the Edge delete buffered samples, so no Edge may write one).
 user iiot-cloud
 topic read iiot/+/telemetry
 topic read iiot/+/command-results
+# Inventory is read at QoS 0, so an offline Cloud session never queues it (telemetry keeps the queue).
+topic read iiot/+/inventory
 topic write iiot/+/commands
 topic write iiot/+/telemetry-acks
 
@@ -14,5 +16,6 @@ topic write iiot/+/telemetry-acks
 # The secrets script never issues an Edge id equal to "iiot-cloud", so no Edge can own the Cloud's.
 pattern write iiot/%u/telemetry
 pattern write iiot/%u/command-results
+pattern write iiot/%u/inventory
 pattern read iiot/%u/commands
 pattern read iiot/%u/telemetry-acks

@@ -24,6 +24,8 @@
     <!-- Aliased: both hosts expose a global Program class. -->
     <ProjectReference Include="..\..\src\Cloud\IndustrialIot.Cloud.csproj" Aliases="cloud" />
     <ProjectReference Include="..\..\src\Edge\IndustrialIot.Edge.csproj" />
+    <!-- The SCADA sample client, run against the real stack by EndToEndInventoryTests. -->
+    <ProjectReference Include="..\..\samples\InventoryClient\InventoryClient.csproj" />
   </ItemGroup>
 
 </Project>

@@ -90,6 +90,7 @@ public static class EdgeServiceCollectionExtensions
         services.TryAddSingleton<MqttConnection>();
         services.AddHostedService(provider => provider.GetRequiredService<MqttConnection>());
         services.AddHostedService<TelemetryPublisher>();
+        services.AddHostedService<InventoryPublisher>();
 
         services.TryAddSingleton<CommandLog>();
         services.TryAddSingleton<CommandExecutor>();

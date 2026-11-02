@@ -16,6 +16,7 @@ public sealed class LiveNotifier(IHubContext<LiveHub> hub, IServiceScopeFactory 
 {
     public const string TelemetryMethod = "telemetry";
     public const string CommandUpdatedMethod = "commandUpdated";
+    public const string DevicesUpdatedMethod = "devicesUpdated";
 
     private static readonly TimeSpan PushTimeout = TimeSpan.FromSeconds(2);
 
@@ -34,6 +35,19 @@ public sealed class LiveNotifier(IHubContext<LiveHub> hub, IServiceScopeFactory 
         catch (Exception ex) when (ex is not OutOfMemoryException)
         {
             Log(TelemetryMethod, sample.EdgeId, ex);
+        }
+    }
+
+    /// <summary>Pushes the <c>GET /api/v1/edges/{edgeId}/devices</c> body after a stored inventory round, as that route writes it.</summary>
+    public async Task DevicesUpdatedAsync(DevicesResponse devices)
+    {
+        try
+        {
+            await SendAsync(devices.EdgeId, DevicesUpdatedMethod, JsonSerializer.SerializeToElement(devices, JsonSerializerOptions.Web)).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            Log(DevicesUpdatedMethod, devices.EdgeId, ex);
         }
     }
 

@@ -236,6 +236,10 @@ khoảng 20 Edge. Vượt giới hạn thì broker bỏ bớt tin cho Cloud; d�
    không build tay: làm theo [docs/server-deploy.md](server-deploy.md).
 3. Từng Edge (gói cài mới).
 
+Edge nhiều PLC (cấu hình v2, [plc-setup.md mục 9](plc-setup.md#9-nhiều-plc-trên-một-edge-cấu-hình-v2)) và tag
+`String`/`LReal`/`DTL`: **nâng cấp Cloud trước** rồi mới tới Edge — Cloud cũ không nhận giá trị chuỗi. Giá trị chuỗi
+lưu trong cột `jsonb`, nên database PostgreSQL phải dùng encoding `UTF8` (mặc định của image `postgres`).
+
 Khi `deployments/keycloak/iiot-realm.json` đổi (ví dụ thêm client `iiot-scada` cho trang SCADA): `docker compose -f
 deployments/compose.yaml up -d --force-recreate keycloak` để nạp lại realm.
 
@@ -367,8 +371,11 @@ Bên cạnh có `edge.settings-password.json` (chỉ lưu hash PBKDF2 của mậ
 
 - nó là nguồn **duy nhất** của `Edge:Plc`, `Edge:Poll` và `Edge:Tags`: các mục này trong `appsettings.json` và biến
   môi trường `Edge__Plc__Host` mà `install-edge.ps1 -PlcHost` ghi vào service đều **bị bỏ qua**;
+- với `"SchemaVersion": 2` file chứa `Edge:Channels` (nhiều PLC) thay cho `Plc`/`Poll`/`Tags`; trang cấu hình chỉ
+  sửa file một PLC và từ chối lưu đè file v2 (sửa file v2 bằng Notepad **Run as administrator**);
 - các mục khác (`Commands`, `Mqtt`, `Monitor`, `Buffer`…) vẫn lấy từ `appsettings.json` / biến môi trường; file
-  chứa khoá nào khác ngoài `SchemaVersion` và `Edge:Plc`/`Poll`/`Tags` thì Edge không khởi động và log tên khoá đó;
+  chứa khoá nào khác ngoài `SchemaVersion` và `Edge:Plc`/`Poll`/`Tags` (v1) hoặc `Edge:Channels` (v2) thì Edge không
+  khởi động và log tên khoá đó;
 - gỡ cài đặt không có `-RemoveData` và cài lại đều **giữ** file này (cùng mật khẩu).
 
 **Tag được ghi (`Writable`)** không sửa được trên trang: trang hiển thị chúng bị khoá ("Được ghi"), chỉ cho xoá, và

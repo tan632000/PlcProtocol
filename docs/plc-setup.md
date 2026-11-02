@@ -147,7 +147,7 @@ Bấm chọn CPU trong **Device view** → cửa sổ **Properties** (phía dư�
    có byte trống (ví dụ byte 1 ở trên).
 
    Quy tắc tiền tố địa chỉ: `Bool` → `DBX<byte>.<bit>`; `Byte` → `DBB`; `Word`/`Int` → `DBW`;
-   `DWord`/`DInt`/`Real` → `DBD`. Chưa hỗ trợ `String`, `DTL`, `LReal`.
+   `DWord`/`DInt`/`Real` → `DBD`. `String`, `LReal`, `DTL` dùng địa chỉ byte `DBB` (mục 9.2).
 
 Không cần viết chương trình trong `Main [OB1]` để thử đọc/ghi: giá trị được đổi bằng Watch table (mục 0.8).
 
@@ -302,20 +302,20 @@ Sau mọi lỗi kết nối, lần gọi tiếp theo tự mở kết nối mới
   phần cứng.
 - S7netplus 0.20.0 chỉ đóng socket khi nó còn ở trạng thái "connected"; sau lỗi connect hoặc peer reset,
   socket cũ chờ GC thu hồi. Khi PLC mất kết nối lâu, tầng gọi driver nên retry có backoff thay vì gọi dồn dập.
-- Chưa hỗ trợ kiểu `String`, `DTL`, `LReal`.
+- `String`, `LReal`, `DTL` (mục 9.2) mới được kiểm thử với PLC giả lập `[UNVERIFIED — kiểm khi chạy thử, mục 9.5]`.
 
 ## 8. Mitsubishi FX5U (SLMP)
 
 Với PLC Mitsubishi FX5U, đặt `"Protocol": "Slmp"` trong `Edge:Plc`: Edge đọc qua giao thức **SLMP** (khung 3E,
-dữ liệu nhị phân, TCP). Giao thức mặc định vẫn là `S7`. Edge **không bao giờ ghi** vào PLC qua SLMP; cấu hình
-`Edge:Commands:Enabled = true` cùng `Protocol = Slmp` làm Edge dừng ngay khi khởi động. PLC Monitor
+dữ liệu nhị phân, TCP). Giao thức mặc định vẫn là `S7`. Edge chỉ ghi vào FX5U khi đủ các công tắc ở mục 9.4
+(mặc định tắt); `X` không bao giờ ghi được. PLC Monitor
 (`http://localhost:5080/`) hiện giao thức, IP và cổng (Rack/Slot chỉ hiện với S7).
 
 ### 8.1. Cấu hình trong GX Works3
 
 > [UNVERIFIED — tên và vị trí các mục menu bên dưới (Module Parameter → Ethernet Port, External Device Configuration,
 > Alive Check, Communication Data Code, việc phải reset sau khi ghi parameter) chưa được đối chiếu trên GX Works3 thật;
-> sẽ kiểm khi chạy thử với FX5U (task-07 của specs/plc-multi-protocol) và sửa lại nếu khác.]
+> sẽ kiểm khi chạy thử với FX5U (task-10 của specs/multi-device-core) và sửa lại nếu khác.]
 
 Vào **Navigation** → **Parameter** → **FX5UCPU** → **Module Parameter** → **Ethernet Port**:
 
@@ -334,7 +334,8 @@ Vào **Navigation** → **Parameter** → **FX5UCPU** → **Module Parameter** �
 
 Tác dụng chính xác của từng lớp bảo vệ (IP Filter chặn kết nối từ IP khác ở mức nào, **Disable All (SLMP)** chặn
 những lệnh nào, Alive Check đóng kết nối sau bao lâu) `[UNVERIFIED — kiểm trên PLC bench theo FX5 communication
-manual]`. Edge chỉ gửi lệnh đọc nên cấu hình trên không ảnh hưởng việc đọc.
+manual]`. Khi ghi còn tắt (mặc định), Edge chỉ gửi lệnh đọc nên cấu hình trên không ảnh hưởng việc đọc. Nếu bật
+ghi (mục 9.4), **Disable All (SLMP)** có thể chặn cả lệnh ghi của Edge `[UNVERIFIED — kiểm trên PLC bench]`.
 
 ### 8.2. Kết nối và địa chỉ
 
@@ -345,7 +346,7 @@ manual]`. Edge chỉ gửi lệnh đọc nên cấu hình trên không ảnh hư
 
 | Địa chỉ | Ý nghĩa | `DataType` |
 |---|---|---|
-| `D<n>` | Thanh ghi dữ liệu, `n` thập phân (ví dụ `D0`, `D100`) | `Int`, `Word`, `DInt`, `DWord`, `Real` |
+| `D<n>` | Thanh ghi dữ liệu, `n` thập phân (ví dụ `D0`, `D100`) | `Int`, `Word`, `DInt`, `DWord`, `Real`, `LReal`, `String` |
 | `M<n>` | Relay nội bộ, `n` thập phân (ví dụ `M10`) | `Bool` |
 | `X<n>` | Ngõ vào, `n` **bát phân** đúng như GX Works3 hiện | `Bool` |
 | `Y<n>` | Ngõ ra, `n` **bát phân** đúng như GX Works3 hiện | `Bool` |
@@ -353,7 +354,8 @@ manual]`. Edge chỉ gửi lệnh đọc nên cấu hình trên không ảnh hư
 - Kiểu 2 word (`DInt`, `DWord`, `Real`) chiếm `D<n>` và `D<n+1>`, **word thấp trước** (little-endian): ví dụ `Real`
   tại `D10` dùng `D10` (word thấp) và `D11` (word cao).
 - `X`/`Y` theo bát phân: `X17` là ngõ vào thứ 16 (`X0`–`X7`, `X10`–`X17`); `X8` và `X9` **không tồn tại**.
-- Tag SLMP luôn chỉ đọc; không dùng `"Writable": true`.
+- `X` luôn chỉ đọc. `D`, `M`, `Y` ghi được khi đủ công tắc ở mục 9.4. **Cảnh báo:** `Y` mà chương trình PLC điều
+  khiển bằng lệnh `OUT` sẽ bị ghi đè ở vòng quét kế tiếp khi PLC đang RUN; giá trị Edge ghi chỉ tồn tại trong tích tắc.
 
 ### 8.3. Cấu hình Edge
 
@@ -375,3 +377,168 @@ manual]`. Edge chỉ gửi lệnh đọc nên cấu hình trên không ảnh hư
 
 Giới hạn: driver SLMP mới được kiểm thử với PLC giả lập trên loopback (`FakeSlmpServer`), **chưa** thử trên FX5U
 thật `[UNVERIFIED — kiểm trên PLC bench]`.
+
+## 9. Nhiều PLC trên một Edge (cấu hình v2)
+
+Một Edge đọc được nhiều PLC cùng lúc: S7-1200, FX5U (SLMP 3E) và FX3U (MC 1E qua FX3U-ENET-ADP), tối đa khoảng 100
+tag mỗi PLC với chu kỳ 1 s. Mỗi PLC có một kết nối và một vòng đọc riêng: một PLC mất mạng không làm chậm PLC khác.
+
+### 9.1. Cấu trúc `Edge:Channels`
+
+Cấu hình v2 có ba tầng **Channel → Device → Tag**. Channel chọn giao thức; mỗi Device là một PLC.
+
+```json
+{
+  "Edge": {
+    "Channels": [
+      { "Name": "S7", "Driver": "S7", "Devices": [
+        { "Name": "Line1", "Model": "S7-1200", "Host": "192.168.3.20", "Tags": [
+          { "Name": "Speed", "Address": "DB1.DBW2", "DataType": "Int" },
+          { "Name": "Batch", "Address": "DB1.DBB20", "DataType": "String", "Length": 20 }
+        ] }
+      ] },
+      { "Name": "Fx", "Driver": "Slmp3E", "Devices": [
+        { "Name": "Press", "Model": "FX5U", "Host": "192.168.3.250", "Port": 5000, "Tags": [
+          { "Name": "Count", "Address": "D100", "DataType": "DInt" }
+        ] }
+      ] }
+    ],
+    "Commands": { "Enabled": false }
+  }
+}
+```
+
+| Khoá | Ý nghĩa |
+|---|---|
+| Channel `Name` | Tên duy nhất, 1..32 ký tự `[A-Za-z0-9_-]` (không phân biệt hoa thường). |
+| Channel `Driver` | `S7`, `Slmp3E` hoặc `Mc1E`. |
+| Device `Name` | Tên duy nhất trên Edge, 1..32 ký tự `[A-Za-z0-9_-]`. Tag `Name` dùng `[A-Za-z0-9_.-]`. TagId gửi lên Cloud là `<Device>.<Tag>` (ví dụ `Line1.Speed`), tối đa 64 ký tự. |
+| Device `Model` | `S7-1200` (kênh `S7`), `FX5U` (kênh `Slmp3E`), `FX3U` (kênh `Mc1E`). |
+| `Host`, `Port` | `Port` bỏ trống với S7-1200 (102). FX5U và FX3U **bắt buộc** `Port` và không được là `102`. Hai Device không dùng chung `Host:Port`. |
+| `Rack`, `Slot` | Chỉ S7; bỏ trống là 0 và 1. |
+| `TimeoutMs`, `PollIntervalMs` | Mặc định 3000 và 1000. |
+| `Enabled` | `false`: giữ cấu hình nhưng không kết nối PLC này. |
+| `WritesEnabled` | Mặc định `false` (mục 9.4). |
+| `LegacyTagIds` | `true`: TagId là `Name` nguyên văn, không có tiền tố Device (Device chuyển từ Edge một PLC). |
+| Tag `Length` | Bắt buộc với `String` (số ký tự). |
+
+- Cấu hình cũ một PLC (`Edge:Plc`, `Edge:Poll`, `Edge:Tags`) vẫn chạy: Edge coi nó là một Device tên `Plc1` và giữ
+  nguyên TagId cũ. **Không** đặt cả hai dạng cùng lúc; Edge dừng khi khởi động và log tên các khoá.
+- Mọi lỗi cấu hình làm Edge dừng khi khởi động, thông báo bắt đầu bằng khoá đầy đủ (ví dụ
+  `Edge:Channels:1:Devices:0:Port ...`).
+
+### 9.2. Kiểu `String`, `LReal`, `DTL`
+
+| Kiểu | S7-1200 | FX5U | FX3U |
+|---|---|---|---|
+| `String` | Địa chỉ byte (`DB1.DBB20`) của biến `String[n]`; `Length` = `n`, 1..218. Edge kiểm độ dài khai báo trên PLC trước khi ghi. | `D<n>`, 2 ký tự mỗi word (byte thấp trước), `Length` 1..254 | Như FX5U, `Length` 1..128 |
+| `LReal` | Địa chỉ byte (`DB1.DBB30`), 8 byte | `D<n>`..`D<n+3>`, word thấp trước | Không hỗ trợ |
+| `DTL` | Địa chỉ byte (`DB1.DBB40`), 12 byte | Không hỗ trợ | Không hỗ trợ |
+
+- Chuỗi chỉ dùng ký tự Latin-1; không chứa ký tự NUL; tối đa 256 ký tự.
+- `DTL` là **giờ địa phương của PLC, không có múi giờ**; Edge gửi đúng ngày giờ PLC giữ, không đổi sang UTC. Đặt giờ
+  PLC đúng múi giờ nhà máy.
+- Kiểu không có trong cột của model bị từ chối khi khởi động.
+
+### 9.3. Mitsubishi FX3U (MC 1E, FX3U-ENET-ADP)
+
+Edge đọc FX3U qua adapter **FX3U-ENET-ADP** bằng giao thức MC khung 1E, dữ liệu nhị phân (theo FX3U-ENET-ADP
+User's Manual JY997D45801).
+
+Trong GX Works2 (bản 1.90U trở lên; bản 1.73B đến trước 1.90U cần cài thêm FX Configurator-EN; bản cũ hơn 1.73B
+không cài đặt được adapter): **FX Parameter** → tab **Ethernet Adapter**:
+
+1. **Channel**: kênh gắn adapter (CH1/CH2). Đặt **IP Address** và **Subnet Mask Pattern**.
+2. **Communication Data Code**: **Binary Code**.
+3. **Open Setting**: thêm một kết nối **Protocol** `TCP`, **Open System** `MC Protocol`, **Host Station Port No.** trong
+   khoảng 1025–5548 hoặc 5560–65534 (ví dụ `5600`; màn hình GX Works2 ở mục 9.2 của manual ghi 5560, mục 6.11 ghi
+   5552, nên tránh 5549–5559). `Port` của Device phải đúng bằng số này.
+4. Ghi parameter xuống PLC rồi cấp nguồn lại.
+
+Adapter cho tối đa 4 kết nối (MELSOFT + MC + Data monitoring). Edge dùng một kết nối.
+
+| Địa chỉ | Ý nghĩa | `DataType` |
+|---|---|---|
+| `D<n>` | 0..7999 | `Int`, `Word`, `DInt`, `DWord`, `Real`, `String` |
+| `M<n>` | 0..7679 | `Bool` |
+| `X<n>`, `Y<n>` | Bát phân, 0..377 | `Bool` |
+
+**Ghi vào FX3U bị tắt cho tới khi được thử trên FX3U thật:** `WritesEnabled: true` hoặc `Writable: true` trên Device
+FX3U làm Edge dừng khi khởi động với lỗi `... FX3U writes are disabled until verified on a real FX3U.`
+
+### 9.4. Quy tắc ghi
+
+Một lệnh ghi chỉ tới PLC khi **tất cả** đều bật. Thiếu công tắc 1 hoặc 2 thì lệnh không tới được Edge (API trả 404,
+hoặc lệnh `timed_out`); thiếu công tắc 3 hoặc 4 thì Edge từ chối kèm lý do. Không trường hợp nào có khung gửi tới PLC:
+
+1. Phía Cloud và broker: các công tắc ở [Chế độ read-only và cách bật ghi](deployment.md#chế-độ-read-only-và-cách-bật-ghi).
+2. Edge: `Edge:Commands:Enabled = true`.
+3. Device: `Enabled = true` và `WritesEnabled = true`.
+4. Tag: `Writable = true` (kèm `Min`/`Max` nếu cần).
+
+Không bao giờ ghi được: `X` (FX5U, FX3U), vùng ngõ vào của S7 (`I`), và mọi Device FX3U (mục 9.3).
+
+### 9.5. Lab nhiều PLC và đo thời gian đọc
+
+File `src/Edge/lab/multi/appsettings.json` (không bao giờ đóng gói) có ba Device, mỗi Device 100 tag gồm các khối
+liền nhau và vài tag rời rạc ở xa:
+
+| Device | Model | Host:Port | Ghi chú |
+|---|---|---|---|
+| `S7Lab` | S7-1200 | 192.168.3.20 | DB2 bên dưới |
+| `Fx5uLab` | FX5U | 192.168.3.250:5000 | Có một tag ghi được `WriteTarget` (`D300`); `WritesEnabled` vẫn `false` |
+| `Fx3uLab` | FX3U | 192.168.3.251:5600 | `Enabled: false`; sửa Host/Port theo adapter thật rồi đặt `true` nếu có FX3U |
+
+**DB2 trên S7-1200:** tạo Global DB `Lab`, số `2`, **bỏ tick Optimized block access**, khai báo đúng thứ tự:
+
+| Biến | Kiểu | Offset |
+|---|---|---|
+| `Bools` | `Array[0..15] of Bool` | 0.0 |
+| `Ints` | `Array[0..29] of Int` | 2.0 |
+| `DInts` | `Array[0..9] of DInt` | 62.0 |
+| `Reals` | `Array[0..19] of Real` | 102.0 |
+| `LReals` | `Array[0..3] of LReal` | 182.0 |
+| `Name` | `String[20]` | 214.0 |
+| `Stamp` | `DTL` | 236.0 |
+| `Words` | `Array[0..7] of Word` | 248.0 |
+| `Bytes` | `Array[0..3] of Byte` | 264.0 |
+| `Gap` | `Array[0..731] of Byte` | 268.0 |
+| `FarInt` | `Int` | 1000.0 |
+| `FarReal` | `Real` | 1002.0 |
+| `FarDInt` | `DInt` | 1006.0 |
+| `FarBool` | `Bool` | 1010.0 |
+| `FarLReal` | `LReal` | 1012.0 |
+| `FarName` | `String[10]` | 1020.0 |
+
+Sau khi compile, so cột **Offset** của TIA với bảng; khác thì sửa địa chỉ trong file lab theo TIA.
+
+**Giá trị để so:** đặt giá trị khác nhau và dễ nhận ra, không để toàn số 0: ví dụ `Ints[i]` = `1000 + i` (có một số
+âm), `Reals` có phần thập phân, `Name` = `Lab-S7`, `Stamp` là một ngày giờ cụ thể; FX5U: `D100..D129` = `100..129`,
+`D600` = `Lab-FX`, bật/tắt xen kẽ `M0..M15`. Một `DTL` lệch đúng vài giờ là dấu hiệu lỗi múi giờ.
+
+**Chạy thử:**
+
+1. Visual Studio → profile **Multi-PLC lab (no broker)** → chạy. Mở `http://localhost:5080/`: mỗi PLC một dòng.
+2. PowerShell khác:
+
+   ```powershell
+   powershell -NoProfile -File src/Edge/lab/measure-read-ms.ps1 -Url http://localhost:5080 -Cycles 30 -Devices S7Lab,Fx5uLab
+   ```
+
+   Script lấy mẫu `/api/status` tới khi mỗi Device có ≥ 30 chu kỳ, in trung vị `readMs` và `requests` từng Device,
+   trả exit 1 nếu một trung vị > 500 ms, hoặc một Device trong `-Devices` không có hay chưa đủ chu kỳ.
+3. So từng giá trị trên PLC Monitor với Watch table (TIA) / Device monitor (GX Works3).
+4. Rút cáp một PLC: PLC kia vẫn đọc bình thường, `lastGoodUtc` của nó vẫn tăng.
+5. Ghi (cần trial stack đang chạy trên máy này, [deployment.md](deployment.md)):
+   1. Chạy profile **Multi-PLC lab + local broker** thay cho profile no-broker. Profile này dùng danh tính
+      `line1-edge01` mà trial stack đã cấp; mật khẩu MQTT và `ca.pem` lấy từ User Secrets như profile
+      **PLC + local broker**. Không chạy cùng lúc với Edge khác dùng `line1-edge01`.
+   2. Bật công tắc Cloud và broker (số 2 và 3 ở [Chế độ read-only và cách bật ghi](deployment.md#chế-độ-read-only-và-cách-bật-ghi)).
+   3. Trên Edge thêm **tạm** hai biến qua **Debug → IndustrialIot.Edge Debug Properties** (không commit):
+      `Edge__Commands__Enabled=true` và `Edge__Channels__1__Devices__0__WritesEnabled=true`, rồi chạy lại Edge.
+   4. Nếu FX5U đang đặt **Disable All (SLMP)** (mục 8.1 bước 5), tạm cho phép trong lúc thử ghi
+      `[UNVERIFIED — mục này có chặn lệnh ghi SLMP hay không]`.
+   5. Gửi lệnh ghi `Fx5uLab.WriteTarget` qua API lệnh ([deployment.md mục 4](deployment.md#4-lấy-token-và-gọi-api)) và
+      thấy giá trị mới trong GX Works3. Gửi lệnh ghi một tag không `Writable` (ví dụ `Fx5uLab.Int00`): Edge trả lý do
+      từ chối, PLC không đổi.
+   6. Xong: xoá hai biến tạm, đặt lại **Disable All (SLMP)** và công tắc Cloud/broker như cũ.

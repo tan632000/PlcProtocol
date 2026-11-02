@@ -209,6 +209,7 @@ giữ cổng 8080 thì smoke luôn exit 2 dù stack đã tắt; chạy nó trên
 | Edge báo lỗi chứng chỉ | IP/tên Edge dùng không có trong `--san` | Tạo lại secret với `--san` đúng (phải cài lại Edge) |
 | Edge kết nối được nhưng Cloud không nhận dữ liệu | EdgeId chưa có trong allow-list hoặc Username ≠ EdgeId | `--add-edge` + `--force-recreate`; kiểm tra cấu hình Edge |
 | Mosquitto log "not authorised" | Sai mật khẩu, sai username, hoặc publish ra topic của Edge khác | Kiểm tra `Edge__Mqtt__Password` và EdgeId |
+| Cloud log `Broker refused subscription(s): iiot/+/inventory`, không kết nối được, `/health/ready` trả 503 | Broker còn ACL cũ (chưa có topic `inventory`) | Cập nhật `deployments/mosquitto/acl` (và `acl-commands`) rồi `--force-recreate mosquitto`, sau đó mới tới Cloud — xem [Thứ tự nâng cấp](#thứ-tự-nâng-cấp) |
 | Edge log `Broker refused subscription(s): iiot/<id>/telemetry-acks`, không kết nối được | Broker còn ACL cũ (chưa có topic `telemetry-acks`) | Cập nhật `deployments/mosquitto/acl` rồi `--force-recreate mosquitto` — xem [Thứ tự nâng cấp](#thứ-tự-nâng-cấp) |
 | "Buffer chờ gửi" trên PLC Monitor tăng mãi dù MQTT đã kết nối | Cloud tắt, Cloud bản cũ (không gửi xác nhận), hoặc Cloud log `timestamp more than 2 minutes in the future` | Bật/nâng cấp Cloud; sửa NTP trên máy Edge. Dữ liệu vẫn nằm trên Edge, không mất |
 | Mosquitto log `Outgoing messages are being dropped` | Cloud offline lâu, hàng đợi của broker cho Cloud đầy | Không mất dữ liệu: Edge giữ mẫu tới khi Cloud xác nhận và tự gửi lại. Nếu xảy ra thường xuyên, xem quy tắc tính `max_queued_messages` bên dưới |
@@ -235,6 +236,11 @@ khoảng 20 Edge. Vượt giới hạn thì broker bỏ bớt tin cho Cloud; d�
 2. Cloud: `docker compose -f deployments/compose.yaml up -d --build cloud` (máy chạy thử). Trên server do CD quản lý,
    không build tay: làm theo [docs/server-deploy.md](server-deploy.md).
 3. Từng Edge (gói cài mới).
+
+Danh sách PLC/tag của Edge (topic `iiot/+/inventory`, API ở [scada-integration.md](scada-integration.md)) đi theo đúng
+thứ tự broker → Cloud → Edge: ACL mới (cả `acl` lẫn `acl-commands`) cho Cloud đọc `iiot/+/inventory`; Cloud mới
+subscribe topic đó, nên với broker còn ACL cũ Cloud **không kết nối được** (log `Broker refused subscription(s):
+iiot/+/inventory`) và ngừng nhận cả telemetry. Edge cũ không gửi danh sách: API trả `devices` rỗng cho Edge đó.
 
 Edge nhiều PLC (cấu hình v2, [plc-setup.md mục 9](plc-setup.md#9-nhiều-plc-trên-một-edge-cấu-hình-v2)) và tag
 `String`/`LReal`/`DTL`: **nâng cấp Cloud trước** rồi mới tới Edge — Cloud cũ không nhận giá trị chuỗi. Giá trị chuỗi

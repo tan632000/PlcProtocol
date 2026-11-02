@@ -70,7 +70,7 @@ public sealed class EdgeSupervisorTests : IAsyncDisposable
         Assert.Equal(ApplyState.Applied, status.State);
 
         // Stopping alone is not enough: disposing releases the driver singleton (its connection) and the port.
-        Assert.Throws<ObjectDisposedException>(() => first.Services.GetRequiredService<IPlcDriver>());
+        Assert.Throws<ObjectDisposedException>(() => first.Services.GetRequiredService<PlcDeviceRegistry>());
         await WaitUntilAsync(() => plc.AcceptCount >= 2, "second PLC connection");
         await Task.Delay(300);
         Assert.Equal(1, plc.OpenConnections);
@@ -445,7 +445,7 @@ public sealed class EdgeSupervisorTests : IAsyncDisposable
     }
 
     private static IReadOnlyList<string> Tags(IHost inner) =>
-        inner.Services.GetRequiredService<PlcTagCatalog>().Tags.Select(t => t.TagId).ToList();
+        inner.Services.GetRequiredService<PlcDeviceRegistry>().Devices[0].Catalog.Tags.Select(t => t.TagId).ToList();
 
     private static string Revision(byte[] bytes) => Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(bytes));
 

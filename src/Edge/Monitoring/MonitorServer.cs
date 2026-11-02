@@ -15,19 +15,15 @@ namespace IndustrialIot.Edge.Monitoring;
 
 /// <summary>
 /// Serves the local monitor page (<c>/</c>) and its data (<c>/api/status</c>) on <c>localhost</c> only.
-/// Read-only by design: it shows the poller's last cycle, the MQTT link and the buffer backlog, never
+/// Read-only by design: it shows each PLC's last poll cycle, the MQTT link and the buffer backlog, never
 /// talks to the PLC itself and offers no way to write. A port that is already taken is logged and the
 /// Edge keeps running without the page.
 /// </summary>
 internal sealed class MonitorServer(
     IOptions<MonitorOptions> options,
     IOptions<EdgeOptions> edge,
-    IOptions<PlcProtocolOptions> protocol,
-    IOptions<SiemensS7Options> s7,
-    IOptions<SlmpOptions> slmp,
     IOptions<MqttOptions> mqtt,
-    IOptions<PollOptions> poll,
-    PlcTagCatalog catalog,
+    PlcDeviceRegistry registry,
     LiveTagSnapshot snapshot,
     TelemetryStore store,
     MqttConnection mqttConnection,
@@ -143,23 +139,31 @@ internal sealed class MonitorServer(
 
     internal async Task<MonitorStatus> BuildStatusAsync(CancellationToken ct)
     {
-        var cycle = snapshot.Latest;
-        var readings = cycle?.Readings.ToDictionary(r => r.TagId, StringComparer.Ordinal);
-
-        var tags = catalog.Tags.Select(tag =>
+        var cycles = snapshot.Devices;
+        var lastGood = snapshot.LastGoodUtc;
+        var tags = new List<TagStatus>();
+        var devices = new List<DeviceStatus>();
+        foreach (var device in registry.Devices)
         {
-            TagReading? reading = null;
-            readings?.TryGetValue(tag.TagId, out reading);
-            return new TagStatus(
-                tag.TagId,
-                tag.Address.Canonical,
-                tag.DataType.ToString(),
-                tag.Writable,
-                reading?.Value,
-                reading is null ? null : QualityName(reading.Quality),
-                reading?.TimestampUtc,
-                reading?.Error);
-        }).ToList();
+            var cycle = cycles.GetValueOrDefault(device.Name);
+            var readings = cycle?.Readings.ToDictionary(r => r.TagId, StringComparer.Ordinal);
+            tags.AddRange(device.Catalog.Tags.Select(tag =>
+            {
+                TagReading? reading = null;
+                readings?.TryGetValue(tag.TagId, out reading);
+                return new TagStatus(
+                    tag.TagId,
+                    device.Name,
+                    tag.Address.Canonical,
+                    tag.DataType.ToString(),
+                    tag.Writable,
+                    reading?.Value,
+                    reading is null ? null : QualityName(reading.Quality),
+                    reading?.TimestampUtc,
+                    reading?.Error);
+            }));
+            devices.Add(Device(device, cycle, lastGood.TryGetValue(device.Name, out var good) ? good : null));
+        }
 
         long? pending;
         try
@@ -171,31 +175,70 @@ internal sealed class MonitorServer(
             pending = null; // The page shows "unknown"; the store logs its own failures.
         }
 
-        var plcState = cycle switch
+        // The single-PLC fields stay for an Edge with one PLC; with several, devices[] carries them.
+        var only = registry.Devices is [var single] ? single : null;
+        var onlyCycle = only is null ? null : cycles.GetValueOrDefault(only.Name);
+        var m = mqtt.Value;
+        return new MonitorStatus(
+            edge.Value.EdgeId,
+            clock.GetUtcNow(),
+            only?.Device.PollIntervalMs,
+            cycles.Count == 0 ? null : cycles.Values.Max(c => c.CompletedUtc),
+            onlyCycle is null ? null : Math.Round(onlyCycle.ReadDuration.TotalMilliseconds, 1),
+            only is null ? null : Plc(only, onlyCycle),
+            devices,
+            new MqttStatus(m.Host, m.Port, mqttConnection.IsConnected),
+            pending,
+            tags,
+            SettingsApply());
+    }
+
+    /// <summary>disabled (not read), waiting (no cycle yet), connected or unavailable (the last cycle's outcome).</summary>
+    private static DeviceStatus Device(DeviceRuntime device, PollCycle? cycle, DateTimeOffset? lastGoodUtc)
+    {
+        var state = (device.Driver, cycle) switch
+        {
+            (null, _) => "disabled",
+            (_, null) => "waiting",
+            (_, { PlcUnavailable: true }) => "unavailable",
+            _ => "connected",
+        };
+        var d = device.Device;
+        return new DeviceStatus(
+            d.Name,
+            d.Model,
+            d.Host,
+            Endpoint(device).Port,
+            state,
+            lastGoodUtc,
+            cycle?.Readings.Select(r => r.Error).FirstOrDefault(error => error is not null),
+            cycle is null ? null : Math.Round(cycle.ReadDuration.TotalMilliseconds, 1),
+            cycle?.Requests);
+    }
+
+    private static PlcStatus Plc(DeviceRuntime device, PollCycle? cycle)
+    {
+        var state = cycle switch
         {
             null => "waiting",
             { PlcUnavailable: true } => "unavailable",
             _ when cycle.Readings.Any(r => r.Quality != TelemetryQuality.Good) => "partial",
             _ => "ok",
         };
+        var (protocol, port, rack, slot) = Endpoint(device);
+        return new PlcStatus(protocol, device.Device.Host, port, rack, slot, device.Device.TimeoutMs, state);
+    }
 
-        // Only the selected protocol's options are validated and meaningful; read just those.
-        PlcProtocolOptions.TryParse(protocol.Value.Protocol, out var selected);
-        var plcStatus = selected == PlcProtocol.Slmp
-            ? new PlcStatus(nameof(PlcProtocol.Slmp), slmp.Value.Host, slmp.Value.Port, null, null, slmp.Value.TimeoutMs, plcState)
-            : new PlcStatus(nameof(PlcProtocol.S7), s7.Value.Host, s7.Value.Port, s7.Value.Rack, s7.Value.Slot, s7.Value.TimeoutMs, plcState);
-        var m = mqtt.Value;
-        return new MonitorStatus(
-            edge.Value.EdgeId,
-            clock.GetUtcNow(),
-            poll.Value.IntervalMs,
-            cycle?.CompletedUtc,
-            cycle is null ? null : Math.Round(cycle.ReadDuration.TotalMilliseconds, 1),
-            plcStatus,
-            new MqttStatus(m.Host, m.Port, mqttConnection.IsConnected),
-            pending,
-            tags,
-            SettingsApply());
+    /// <summary>The protocol name and the port, rack and slot the driver uses, defaults included.</summary>
+    private static (string Protocol, int Port, int? Rack, int? Slot) Endpoint(DeviceRuntime device)
+    {
+        if (device.Device.Driver == Configuration.PlcDriverKind.Slmp3E)
+        {
+            return (nameof(PlcProtocol.Slmp), PlcDeviceRegistry.SlmpOptions(device.Device).Port, null, null);
+        }
+
+        var s7 = PlcDeviceRegistry.S7Options(device.Device);
+        return (nameof(PlcProtocol.S7), s7.Port, s7.Rack, s7.Slot);
     }
 
     private SettingsApplyStatus SettingsApply()
@@ -245,13 +288,18 @@ internal sealed class MonitorServer(
     }
 }
 
+/// <summary>
+/// <see cref="PollIntervalMs"/>, <see cref="ReadMs"/> and <see cref="Plc"/> describe the only PLC and are null when there
+/// are several; <see cref="Devices"/> lists every PLC; <see cref="LastCycleUtc"/> is the latest cycle of any of them.
+/// </summary>
 internal sealed record MonitorStatus(
     string EdgeId,
     DateTimeOffset NowUtc,
-    int PollIntervalMs,
+    int? PollIntervalMs,
     DateTimeOffset? LastCycleUtc,
     double? ReadMs,
-    PlcStatus Plc,
+    PlcStatus? Plc,
+    IReadOnlyList<DeviceStatus> Devices,
     MqttStatus Mqtt,
     long? BufferPending,
     IReadOnlyList<TagStatus> Tags,
@@ -269,10 +317,27 @@ internal sealed record SettingsApplyStatus(string Revision, string? ApplyId, str
 /// </summary>
 internal sealed record PlcStatus(string Protocol, string Host, int Port, int? Rack, int? Slot, int TimeoutMs, string State);
 
+/// <summary>
+/// One PLC. <see cref="State"/>: disabled, waiting, connected or unavailable. <see cref="LastGoodUtc"/>: the last cycle
+/// with the PLC reachable. <see cref="LastError"/>: the first tag error of the last cycle. <see cref="Requests"/>: requests
+/// of the last cycle, null when the driver does not report them.
+/// </summary>
+internal sealed record DeviceStatus(
+    string Name,
+    string Model,
+    string Host,
+    int Port,
+    string State,
+    DateTimeOffset? LastGoodUtc,
+    string? LastError,
+    double? ReadMs,
+    int? Requests);
+
 internal sealed record MqttStatus(string Host, int Port, bool Connected);
 
 internal sealed record TagStatus(
     string TagId,
+    string Device,
     string Address,
     string DataType,
     bool Writable,

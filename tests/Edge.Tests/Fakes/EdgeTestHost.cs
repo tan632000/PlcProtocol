@@ -1,5 +1,7 @@
 using System.Net;
 using System.Net.Sockets;
+using IndustrialIot.Edge.Configuration;
+using IndustrialIot.Edge.Drivers;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -106,6 +108,25 @@ internal sealed class EdgeTestHost : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Overrides for a multi-device Edge: the single-PLC defaults (<c>Edge:Plc</c>, <c>Edge:Poll</c>, <c>Edge:Tags</c>)
+    /// are removed and <paramref name="channels"/> (keys under <c>Edge:Channels</c>) are added.
+    /// </summary>
+    public static Dictionary<string, string?> MultiDevice(IReadOnlyDictionary<string, string?> channels)
+    {
+        var overrides = DefaultSettings().Keys
+            .Where(key => key.StartsWith("Edge:Plc:", StringComparison.OrdinalIgnoreCase)
+                || key.StartsWith("Edge:Poll:", StringComparison.OrdinalIgnoreCase)
+                || key.StartsWith("Edge:Tags:", StringComparison.OrdinalIgnoreCase))
+            .ToDictionary(key => key, _ => (string?)null, StringComparer.OrdinalIgnoreCase);
+        foreach (var (key, value) in channels)
+        {
+            overrides[key] = value;
+        }
+
+        return overrides;
+    }
+
     private static void RemoveAgentHostedServices(IServiceCollection services)
     {
         var agentServices = services
@@ -173,4 +194,38 @@ internal sealed class EdgeTestHost : IAsyncDisposable
         listener.Stop();
         return port;
     }
+}
+
+/// <summary>Creates each device's driver with a test function and records which devices got one.</summary>
+internal sealed class FakeDriverFactory(Func<ResolvedDevice, IPlcDriver> create) : IPlcDriverFactory
+{
+    private readonly List<string> _created = [];
+
+    public IReadOnlyList<string> Created
+    {
+        get
+        {
+            lock (_created)
+            {
+                return [.. _created];
+            }
+        }
+    }
+
+    public IPlcDriver Create(ResolvedDevice device)
+    {
+        lock (_created)
+        {
+            _created.Add(device.Name);
+        }
+
+        return create(device);
+    }
+}
+
+internal static class FakeDriverServices
+{
+    /// <summary>Every device of the host reads and writes through <paramref name="driver"/> instead of a real PLC.</summary>
+    public static IServiceCollection UseDriver(this IServiceCollection services, IPlcDriver driver) =>
+        services.AddSingleton<IPlcDriverFactory>(new FakeDriverFactory(_ => driver));
 }

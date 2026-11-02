@@ -15,7 +15,7 @@ namespace IndustrialIot.Edge.Settings;
 /// <summary>
 /// The settings API of the loopback monitor: <c>GET /api/settings</c>, <c>POST /api/settings/validate</c> and
 /// <c>PUT /api/settings</c>. A save is checked in this order and refused at the first failing step, before anything
-/// is written: request guard (cross-site, media type, size), shape, the Edge's own startup validators, the writable
+/// is written: request guard (cross-site, media type, size), a multi-device file, shape, the Edge's own startup validators, the writable
 /// rule, revision, password, apply already running. Only then is the apply queued; the supervisor rebuilds the agent
 /// after the response has been sent. Errors give key paths and fixed text, never the submitted values.
 /// </summary>
@@ -23,8 +23,7 @@ public sealed partial class SettingsService(
     IConfiguration configuration,
     EdgeSettingsFile file,
     IOptions<PlcTagCatalogOptions> tags,
-    PlcTagCatalog catalog,
-    IPlcAddressSyntax syntax,
+    PlcDeviceRegistry registry,
     IOptions<PlcProtocolOptions> protocol,
     IServiceProvider services,
     IOptions<PollOptions> poll,
@@ -36,6 +35,9 @@ public sealed partial class SettingsService(
 
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
     private static readonly string[] TopLevelKeys = ["revision", "password", "settings"];
+
+    private const string MultiDeviceMessage =
+        "This Edge uses the multi-device configuration; edit the file or use the new settings page.";
 
     private const string ShapeMessage =
         "Not allowed here: only Plc (Protocol, Host, Port, Rack, Slot, CpuType, TimeoutMs), Poll (IntervalMs) and Tags (TagId, Address, DataType, Writable, Min, Max), each a single value.";
@@ -84,6 +86,14 @@ public sealed partial class SettingsService(
 
         using (body)
         {
+            // This page writes schema 1: saving over a multi-device file would drop the device prefix of every TagId
+            // and each device's writes switch.
+            if (file.Version == EdgeSettingsFile.MultiDeviceSchemaVersion)
+            {
+                await Reply(context, StatusCodes.Status409Conflict, new { error = "multi-device-file", message = MultiDeviceMessage }).ConfigureAwait(false);
+                return;
+            }
+
             var root = body.RootElement;
             var errors = new List<SettingsError>();
             var settings = TopLevel(root, errors);
@@ -355,14 +365,15 @@ public sealed partial class SettingsService(
     {
         if (!string.Equals(current.TagId, proposed.TagId, StringComparison.Ordinal)
             || current.DataType != proposed.DataType || current.Min != proposed.Min || current.Max != proposed.Max
-            || !catalog.TryGet(current.TagId, out var resolved))
+            || registry.Devices is not [var device] // this page edits a single-PLC Edge, whose only device it is
+            || !device.Catalog.TryGet(current.TagId, out var resolved))
         {
             return false;
         }
 
         try
         {
-            return syntax.Parse(proposed.Address, proposed.DataType).Canonical == resolved.Address.Canonical;
+            return device.Syntax.Parse(proposed.Address, proposed.DataType).Canonical == resolved.Address.Canonical;
         }
         catch (PlcException)
         {

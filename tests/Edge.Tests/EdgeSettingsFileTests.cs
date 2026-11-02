@@ -26,7 +26,7 @@ public sealed class EdgeSettingsFileTests : IDisposable
     {
         using var host = Build(BaseSettings(tagCount: 3));
 
-        Assert.Equal(3, host.Services.GetRequiredService<PlcTagCatalog>().Tags.Count);
+        Assert.Equal(3, host.Services.GetRequiredService<PlcDeviceRegistry>().Devices[0].Catalog.Tags.Count);
         Assert.False(File.Exists(SettingsPath()));
     }
 
@@ -43,7 +43,7 @@ public sealed class EdgeSettingsFileTests : IDisposable
 
         using var host = Build(BaseSettings(tagCount: 21));
 
-        var tags = host.Services.GetRequiredService<PlcTagCatalog>().Tags;
+        var tags = host.Services.GetRequiredService<PlcDeviceRegistry>().Devices[0].Catalog.Tags;
         Assert.Equal(["A.One", "A.Two"], tags.Select(t => t.TagId));
     }
 
@@ -81,13 +81,26 @@ public sealed class EdgeSettingsFileTests : IDisposable
         using var host = Build(settings);
 
         Assert.IsType<SlmpAddressSyntax>(host.Services.GetRequiredService<IPlcAddressSyntax>());
-        Assert.IsType<MitsubishiSlmpDriver>(host.Services.GetRequiredService<IPlcDriver>());
-        Assert.Equal(["F.D100"], host.Services.GetRequiredService<PlcTagCatalog>().Tags.Select(t => t.TagId));
+        Assert.IsType<MitsubishiSlmpDriver>(host.Services.GetRequiredService<PlcDeviceRegistry>().Devices[0].Driver!);
+        Assert.Equal(["F.D100"], host.Services.GetRequiredService<PlcDeviceRegistry>().Devices[0].Catalog.Tags.Select(t => t.TagId));
     }
 
     [Theory]
-    [InlineData("""{"SchemaVersion":2,"Edge":{"Tags":[]}}""", "SchemaVersion")]
-    [InlineData("""{"Edge":{"Tags":[]}}""", "SchemaVersion")]
+    [InlineData("""{"SchemaVersion":3,"Edge":{"Tags":[]}}""", "SchemaVersion must be 1 or 2.")]
+    [InlineData("""{"Edge":{"Tags":[]}}""", "SchemaVersion must be 1 or 2.")]
+    [InlineData("""{"SchemaVersion":2,"Edge":{"Tags":[]}}""", "Edge:Tags")]
+    [InlineData("""{"SchemaVersion":2,"Edge":{"Plc":{"Host":"x"}}}""", "Edge:Plc")]
+    [InlineData("""{"SchemaVersion":1,"Edge":{"Channels":[]}}""", "Edge:Channels")]
+    [InlineData("""{"SchemaVersion":2,"Edge":{"Channels":{"Name":"S7"}}}""", "must be an array")]
+    [InlineData("""{"SchemaVersion":2,"Edge":{"Channels":[{"Name":"S7","Bogus":1}]}}""", "Edge:Channels:0:Bogus")]
+    [InlineData("""{"SchemaVersion":2,"Edge":{"Channels":[{"Name":"S7","Devices":[{"Name":"A","Password":"x"}]}]}}""", "Edge:Channels:0:Devices:0:Password")]
+    [InlineData("""{"SchemaVersion":2,"Edge":{"Channels":[{"Devices":[{"Tags":[{"Name":"T","Scale":2}]}]}]}}""", "Edge:Channels:0:Devices:0:Tags:0:Scale")]
+    [InlineData("""{"SchemaVersion":2,"Edge":{"Channels":[{"Devices":[{"Host":{"x":1}}]}]}}""", "Edge:Channels:0:Devices:0:Host")]
+    [InlineData("""{"SchemaVersion":2,"Edge":{"Commands":{"Enabled":true}}}""", "Edge:Commands")]
+    [InlineData("""{"SchemaVersion":2,"Edge":{"Channels":[]}}""", "at least one channel")]
+    [InlineData("""{"SchemaVersion":2}""", "at least one channel")]
+    [InlineData("""{"SchemaVersion":2,"Edge":{"Channels":[{}]}}""", "at least one channel")]
+    [InlineData("""{"SchemaVersion":2,"Edge":{"Channels":[{"Name":null,"Devices":[]}]}}""", "at least one channel")]
     [InlineData("""{"SchemaVersion":1,"Edge":{"Tags":[}""", "not valid JSON")]
     [InlineData("""{"SchemaVersion":1,"Edge":{"Commands":{"Enabled":true}}}""", "Edge:Commands")]
     [InlineData("""{"SchemaVersion":1,"Edge":{"Mqtt":{"Host":"evil"}}}""", "Edge:Mqtt")]
@@ -131,7 +144,7 @@ public sealed class EdgeSettingsFileTests : IDisposable
 
         using var host = Build(BaseSettings(tagCount: 4));
 
-        Assert.Equal(["A.One"], host.Services.GetRequiredService<PlcTagCatalog>().Tags.Select(t => t.TagId));
+        Assert.Equal(["A.One"], host.Services.GetRequiredService<PlcDeviceRegistry>().Devices[0].Catalog.Tags.Select(t => t.TagId));
     }
 
     [Theory]

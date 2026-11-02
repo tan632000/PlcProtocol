@@ -79,6 +79,7 @@ internal sealed class FakeS7Server : IAsyncDisposable
     private const int SetupPduOffset = 25;            // TPKT(4) + COTP DT(3) + S7 header(12) + F0 00 00 03 00 03
     private const byte FunctionSetup = 0xF0;
     private const byte FunctionRead = 0x04;
+    private const byte FunctionWrite = 0x05;
     private const byte DefaultMemoryByte = 0xEE;
 
     private readonly FakeS7Mode _mode;
@@ -336,6 +337,7 @@ internal sealed class FakeS7Server : IAsyncDisposable
             FakeS7Mode.HandshakeThenTruncatedFrame => TruncatedReply,
             FakeS7Mode.HandshakeThenItemAccessDenied => ItemReply(function, returnCode: 0x05, data: []),
             FakeS7Mode.HandshakeThenRespond when function == FunctionRead && _memory is not null => LastReply = MemoryReadReply(frame),
+            FakeS7Mode.HandshakeThenRespond when function == FunctionWrite && _memory is not null => MemoryWriteReply(frame),
             FakeS7Mode.HandshakeThenRespond when function == FunctionRead =>
                 ItemReply(function, returnCode: 0xFF, data: ReadData.AsSpan(0, RequestedLength(frame)).ToArray()),
             FakeS7Mode.HandshakeThenRespond => ItemReply(function, returnCode: 0xFF, data: []),
@@ -428,6 +430,46 @@ internal sealed class FakeS7Server : IAsyncDisposable
         }
 
         return AckData(FunctionRead, itemCount, [.. data]);
+    }
+
+    /// <summary>
+    /// Applies a one-item write to memory and acknowledges it: the item spec gives area, DB and the bit address; the data
+    /// part follows the parameters (return code, transport size 03H bit / 04H bytes, length, data).
+    /// </summary>
+    private byte[] MemoryWriteReply(byte[] frame)
+    {
+        var item = frame.AsSpan(FrameFirstItemOffset, ItemSpecLength);
+        var db = (item[6] << 8) | item[7];
+        var area = item[8];
+        var bitAddress = (item[9] << 16) | (item[10] << 8) | item[11];
+        var data = frame.AsSpan(FrameFirstItemOffset + ItemSpecLength);
+        var transport = data[1];
+        var bits = (data[2] << 8) | data[3];
+        lock (_memory!)
+        {
+            var memory = MemoryOf(area, db);
+            if (transport == 0x03)
+            {
+                var mask = (byte)(1 << (bitAddress & 7));
+                memory[bitAddress >> 3] = data[4] != 0 ? (byte)(memory[bitAddress >> 3] | mask) : (byte)(memory[bitAddress >> 3] & ~mask);
+            }
+            else
+            {
+                data.Slice(4, bits / 8).CopyTo(memory.AsSpan(bitAddress >> 3));
+            }
+        }
+
+        return ItemReply(FunctionWrite, returnCode: 0xFF, data: []);
+    }
+
+    /// <summary>Reads <paramref name="length"/> bytes of memory at an S7 address, e.g. to check what a write changed.</summary>
+    public byte[] Peek(string address, int length)
+    {
+        var (area, db, start) = Locate(address);
+        lock (_memory!)
+        {
+            return MemoryOf(area, db).AsSpan(start, length).ToArray();
+        }
     }
 
     /// <summary>TPKT + COTP DT + S7 ack-data header + parameters (function, item count) + data.</summary>

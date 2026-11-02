@@ -33,8 +33,8 @@ public sealed class PlcProtocolOptions
     }
 }
 
-/// <summary>Fails the start on an unknown protocol, or commands on a read-only one.</summary>
-internal sealed class PlcProtocolOptionsValidator(IOptions<CommandsOptions> commands) : IValidateOptions<PlcProtocolOptions>
+/// <summary>Fails the start on an unknown protocol. Both S7 and SLMP can write, so commands are allowed on either.</summary>
+internal sealed class PlcProtocolOptionsValidator : IValidateOptions<PlcProtocolOptions>
 {
     public ValidateOptionsResult Validate(string? name, PlcProtocolOptions options)
     {
@@ -44,13 +44,6 @@ internal sealed class PlcProtocolOptionsValidator(IOptions<CommandsOptions> comm
                 $"{PlcProtocolOptions.KeyName} must be one of S7, Slmp (was '{options.Protocol}').");
         }
 
-        var failures = new List<string>();
-        if (protocol != PlcProtocol.S7 && commands.Value.Enabled)
-        {
-            failures.Add(
-                $"{CommandsOptions.SectionName}:Enabled cannot be true when {PlcProtocolOptions.KeyName} is {protocol}: only S7 supports writes.");
-        }
-
-        return failures.Count == 0 ? ValidateOptionsResult.Success : ValidateOptionsResult.Fail(failures);
+        return ValidateOptionsResult.Success;
     }
 }

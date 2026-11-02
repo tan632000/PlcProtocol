@@ -10,6 +10,66 @@ public class S7AddressSyntaxTests
     private static readonly S7AddressSyntax Syntax = new();
 
     [Theory]
+    [InlineData("DB1.DBB10", PlcDataType.String, 10, true)]
+    [InlineData("DB1.DBB10", PlcDataType.String, 218, true)]
+    [InlineData("DB1.DBB10", PlcDataType.String, 219, false)] // one STRING item must fit a 240-byte PDU
+    [InlineData("DB1.DBB10", PlcDataType.String, 0, false)]
+    [InlineData("DB1.DBW10", PlcDataType.String, 10, false)]
+    [InlineData("DB1.DBB0", PlcDataType.LReal, null, true)]
+    [InlineData("DB1.DBD0", PlcDataType.LReal, null, false)]
+    [InlineData("MB4", PlcDataType.DTL, null, true)]
+    [InlineData("DB1.DBX0.0", PlcDataType.DTL, null, false)]
+    public void NewTypes_NeedAByteAddress_AndAStringLengthThatFitsOnePdu(string address, PlcDataType type, int? length, bool accepted)
+    {
+        if (accepted)
+        {
+            Assert.Equal(address, Syntax.Parse(address, type, length).Canonical);
+        }
+        else
+        {
+            Assert.ThrowsAny<PlcException>(() => Syntax.Parse(address, type, length));
+        }
+    }
+
+    [Theory]
+    [InlineData("DB1.DBB10", "String", null, null, "Length")] // String needs its Length
+    [InlineData("DB1.DBW10", "Int", 10, null, "Length")] // only String has a Length
+    [InlineData("DB1.DBB10", "DTL", null, 1, "Min")] // bounds are for numbers
+    [InlineData("DB1.DBB10", "String", 10, 1, "Min")]
+    public void Catalog_NewTypeRules_FailNamingTheTag(string address, string type, int? length, int? min, string fragment)
+    {
+        var definition = new PlcTagDefinition
+        {
+            TagId = "Line1.Recipe",
+            Address = address,
+            DataType = Enum.Parse<PlcDataType>(type),
+            Length = length,
+            Min = min,
+        };
+
+        var ex = Assert.Throws<InvalidOperationException>(() => new PlcTagCatalog(new PlcTagCatalogOptions { Tags = [definition] }));
+
+        Assert.Contains("Line1.Recipe", ex.Message, StringComparison.Ordinal);
+        Assert.Contains(fragment, ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Catalog_LRealKeepsItsBounds_AndAStringItsLength()
+    {
+        var catalog = new PlcTagCatalog(new PlcTagCatalogOptions
+        {
+            Tags =
+            [
+                new PlcTagDefinition { TagId = "Ratio", Address = "DB1.DBB0", DataType = PlcDataType.LReal, Min = -1, Max = 1 },
+                new PlcTagDefinition { TagId = "Recipe", Address = "DB1.DBB8", DataType = PlcDataType.String, Length = 10 },
+            ],
+        });
+
+        Assert.Equal((-1m, 1m), (catalog.Tags[0].Min, catalog.Tags[0].Max));
+        Assert.Equal(10, catalog.Tags[1].Length);
+    }
+
+    [Theory]
     [InlineData("DB1.DBW0", PlcDataType.Bool, "Address 'DB1.DBW0' cannot hold a Bool value.")]
     [InlineData("DB1.DBX0.1", PlcDataType.Int, "Address 'DB1.DBX0.1' cannot hold a Int value.")]
     [InlineData("db1.dbw2", PlcDataType.DWord, "Address 'DB1.DBW2' cannot hold a DWord value.")]
@@ -55,7 +115,7 @@ public class S7AddressSyntaxTests
         };
 
         var ex = Assert.Throws<InvalidOperationException>(() => new PlcTagCatalog(options, new ForeignSyntax()));
-        Assert.Equal("Tag catalog: writable tag 'A' has a non-S7 address; the overlap check only supports S7 addresses.", ex.Message);
+        Assert.Equal("Tag catalog: writable tag 'A' has an address the overlap check does not know (X1).", ex.Message);
     }
 
     [Fact]
@@ -67,7 +127,7 @@ public class S7AddressSyntaxTests
         };
 
         var ex = Assert.Throws<InvalidOperationException>(() => new PlcTagCatalog(options, new ForeignSyntax()));
-        Assert.Equal("Tag catalog: writable tag 'A' has a non-S7 address; the overlap check only supports S7 addresses.", ex.Message);
+        Assert.Equal("Tag catalog: writable tag 'A' has an address the overlap check does not know (X1).", ex.Message);
     }
 
     [Fact]
@@ -83,7 +143,7 @@ public class S7AddressSyntaxTests
         };
 
         var ex = Assert.Throws<InvalidOperationException>(() => new PlcTagCatalog(options, new MixedSyntax()));
-        Assert.Equal("Tag catalog: tag 'B' has a non-S7 address; the overlap check only supports S7 addresses.", ex.Message);
+        Assert.Equal("Tag catalog: tag 'B' has an address the overlap check does not know (X1).", ex.Message);
     }
 
     [Fact]

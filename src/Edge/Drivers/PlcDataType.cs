@@ -27,4 +27,13 @@ public enum PlcDataType
 
     /// <summary>4 bytes IEEE754 single, CLR <see cref="float"/>.</summary>
     Real,
+
+    /// <summary>Text of <c>Length</c> characters, CLR <see cref="string"/> (S7 <c>STRING[n]</c>; FX two chars per D register).</summary>
+    String,
+
+    /// <summary>8 bytes IEEE754 double, CLR <see cref="double"/>.</summary>
+    LReal,
+
+    /// <summary>S7 date and time, 12 bytes, CLR <see cref="string"/> <c>yyyy-MM-ddTHH:mm:ss.fff</c> in the PLC's local time.</summary>
+    DTL,
 }

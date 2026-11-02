@@ -41,6 +41,34 @@ public class TagPollerTests
     }
 
     [Fact]
+    public async Task StringAndDoubleValues_ArePublished_AndAValueTheContractRefusesIsBadAlone()
+    {
+        var driver = new FakePlcDriver();
+        driver.SetRead("DB1.DBW2", "2026-11-02T10:15:30.123");
+        driver.SetRead("DB1.DBD4", 1.5d);
+        driver.SetRead("DB1.DBW8", new object());
+        driver.SetRead("DB1.DBW10", new string('x', 257));
+        driver.SetRead("DB1.DBW12", "A\0B");
+        await using var edge = await StartPollerAsync(driver, new FakeTimeProvider(),
+        [
+            ("Text", "DB1.DBW2", "Int"),
+            ("Double", "DB1.DBD4", "Real"),
+            ("Odd", "DB1.DBW8", "Int"),
+            ("TooLong", "DB1.DBW10", "Int"),
+            ("Nul", "DB1.DBW12", "Int"),
+        ]);
+
+        await WaitUntilAsync(() => Poller(edge).WaitsArmed >= 1, "first cycle");
+        var samples = await StoredAsync(edge);
+
+        Assert.Equal(["Text", "Double", "Odd", "TooLong", "Nul"], samples.Select(s => s.TagId));
+        Assert.Equal(["\"2026-11-02T10:15:30.123\"", "1.5", null, null, null], samples.Select(s => s.Value?.GetRawText()));
+        Assert.Equal(
+            [TelemetryQuality.Good, TelemetryQuality.Good, TelemetryQuality.Bad, TelemetryQuality.Bad, TelemetryQuality.Bad],
+            samples.Select(s => s.Quality));
+    }
+
+    [Fact]
     public async Task NonFinite_IsNullBad()
     {
         var driver = new FakePlcDriver();
@@ -162,7 +190,7 @@ public class TagPollerTests
             },
             runAgentServices: true);
         var store = edge.Services.GetRequiredService<TelemetryStore>();
-        var driver = edge.Services.GetRequiredService<IPlcDriver>();
+        var driver = edge.Services.GetRequiredService<PlcDeviceRegistry>().Devices[0].Driver!;
 
         await edge.Host.StartAsync();
         await WaitUntilAsync(() => store.CountAsync(default).GetAwaiter().GetResult() >= 1, "first failed cycle");
@@ -207,7 +235,7 @@ public class TagPollerTests
             overrides,
             services =>
             {
-                services.AddSingleton<IPlcDriver>(driver);
+                services.UseDriver(driver);
                 services.AddSingleton<TimeProvider>(clock);
             },
             runAgentServices: true);

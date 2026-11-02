@@ -23,6 +23,8 @@ public class CommandReasonsTests
             "plc_access_denied",
             "write_outcome_unknown",
             "edge_storage_error",
+            "device_writes_disabled",
+            "device_disabled",
         ];
 
         Assert.Equal(expected.Order(StringComparer.Ordinal), CommandReasons.All.Order(StringComparer.Ordinal));

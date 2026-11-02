@@ -20,18 +20,14 @@ public static class DriverServiceCollectionExtensions
         ArgumentNullException.ThrowIfNull(services);
         ArgumentNullException.ThrowIfNull(configuration);
 
-        // Raw reads: a malformed Edge:Commands:Enabled stays the CommandsOptions binder's failure at start.
+        // A raw read: the bound options do not exist yet at composition.
         var protocolOptions = new PlcProtocolOptions();
         if (configuration[PlcProtocolOptions.KeyName] is { } rawProtocol)
         {
             protocolOptions.Protocol = rawProtocol;
         }
 
-        var commandsOptions = new CommandsOptions
-        {
-            Enabled = bool.TryParse(configuration[$"{CommandsOptions.SectionName}:Enabled"], out var enabled) && enabled,
-        };
-        var verdict = new PlcProtocolOptionsValidator(Options.Create(commandsOptions)).Validate(null, protocolOptions);
+        var verdict = new PlcProtocolOptionsValidator().Validate(null, protocolOptions);
         if (verdict.Failed)
         {
             throw new OptionsValidationException(Options.DefaultName, typeof(PlcProtocolOptions), verdict.Failures);

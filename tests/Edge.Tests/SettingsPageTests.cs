@@ -64,7 +64,8 @@ public sealed partial class SettingsPageTests : IAsyncDisposable
         var select = DataTypeSelect().Match(html);
         Assert.True(select.Success, "no <select id=\"dataTypeChoices\"> on the page");
         var values = OptionValue().Matches(select.Value).Select(m => m.Groups[1].Value).ToArray();
-        Assert.Equal(Enum.GetNames<PlcDataType>(), values);
+        // String needs a Length, which the single-PLC (schema 1) settings file has no key for.
+        Assert.Equal(Enum.GetNames<PlcDataType>().Where(name => name != nameof(PlcDataType.String)), values);
     }
 
     [Fact]

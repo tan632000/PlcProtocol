@@ -84,7 +84,18 @@
     <table>
       <thead>
         <tr>
-          <th>Tag</th><th>Địa chỉ</th><th>Kiểu</th><th>Giá trị</th><th>Chất lượng</th><th>Thời điểm đọc</th><th>Ghi</th><th>Lỗi</th>
+          <th>PLC</th><th>Model</th><th>Địa chỉ</th><th>Trạng thái</th><th>Đọc tốt gần nhất</th><th>Thời gian đọc</th><th>Số request</th><th>Lỗi</th>
+        </tr>
+      </thead>
+      <tbody id="devices"></tbody>
+    </table>
+  </div>
+
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Tag</th><th>PLC</th><th>Địa chỉ</th><th>Kiểu</th><th>Giá trị</th><th>Chất lượng</th><th>Thời điểm đọc</th><th>Ghi</th><th>Lỗi</th>
         </tr>
       </thead>
       <tbody id="tags"></tbody>
@@ -103,6 +114,12 @@
     partial: ["Có tag lỗi", "warn"],
     unavailable: ["Mất kết nối", "bad"],
     waiting: ["Chưa có dữ liệu", "idle"],
+  };
+  const DEVICE_STATES = {
+    connected: ["Đang đọc", "ok"],
+    unavailable: ["Mất kết nối", "bad"],
+    waiting: ["Chưa có dữ liệu", "idle"],
+    disabled: ["Đã tắt", "idle"],
   };
   const QUALITY = { good: ["Tốt", "ok"], bad: ["Lỗi", "bad"], uncertain: ["Không chắc", "warn"] };
 
@@ -144,18 +161,43 @@
 
     const now = new Date(s.nowUtc).getTime();
     const last = s.lastCycleUtc ? new Date(s.lastCycleUtc).getTime() : null;
-    // Overdue: well past one interval plus a full PLC timeout, i.e. the poller has stalled.
-    const stale = last !== null && now - last > 3 * s.pollIntervalMs + s.plc.timeoutMs;
-
-    const [plcText, plcCls] = stale ? ["Dữ liệu cũ", "warn"] : (PLC_STATES[s.plc.state] || [s.plc.state, "idle"]);
-    setBadge($("plcState"), plcText, plcCls);
-    const rackSlot = s.plc.rack == null || s.plc.slot == null ? "" : ` · Rack ${s.plc.rack} / Slot ${s.plc.slot}`;
-    $("plcDetail").textContent = `${s.plc.protocol} · ${s.plc.host}:${s.plc.port}${rackSlot}`;
+    // s.plc describes the only PLC; with several PLCs it is null and the PLC table below holds the details.
+    if (s.plc) {
+      // Overdue: well past one interval plus a full PLC timeout, i.e. the poller has stalled.
+      const stale = last !== null && now - last > 3 * s.pollIntervalMs + s.plc.timeoutMs;
+      const [plcText, plcCls] = stale ? ["Dữ liệu cũ", "warn"] : (PLC_STATES[s.plc.state] || [s.plc.state, "idle"]);
+      setBadge($("plcState"), plcText, plcCls);
+      const rackSlot = s.plc.rack == null || s.plc.slot == null ? "" : ` · Rack ${s.plc.rack} / Slot ${s.plc.slot}`;
+      $("plcDetail").textContent = `${s.plc.protocol} · ${s.plc.host}:${s.plc.port}${rackSlot}`;
+    } else {
+      const down = s.devices.filter((d) => d.state === "unavailable").length;
+      setBadge($("plcState"), down ? `${down} PLC mất kết nối` : "Đọc tốt", down ? "bad" : "ok");
+      $("plcDetail").textContent = `${s.devices.length} PLC`;
+    }
 
     $("lastCycle").textContent = last === null ? "—" : formatTime(s.lastCycleUtc);
-    $("pollDetail").textContent = last === null
-      ? `Chu kỳ ${s.pollIntervalMs} ms`
-      : `${((now - last) / 1000).toFixed(1)} giây trước · đọc ${s.readMs} ms · chu kỳ ${s.pollIntervalMs} ms`;
+    if (s.plc) {
+      $("pollDetail").textContent = last === null
+        ? `Chu kỳ ${s.pollIntervalMs} ms`
+        : `${((now - last) / 1000).toFixed(1)} giây trước · đọc ${s.readMs} ms · chu kỳ ${s.pollIntervalMs} ms`;
+    } else {
+      $("pollDetail").textContent = last === null ? "" : `${((now - last) / 1000).toFixed(1)} giây trước · từng PLC ở bảng dưới`;
+    }
+
+    const deviceRows = s.devices.map((d) => {
+      const tr = document.createElement("tr");
+      tr.appendChild(cell(d.name));
+      tr.appendChild(cell(d.model));
+      tr.appendChild(cell(`${d.host}:${d.port}`, "mono"));
+      const [dText, dCls] = DEVICE_STATES[d.state] || [d.state, "idle"];
+      tr.appendChild(badgeCell(dText, dCls));
+      tr.appendChild(cell(formatTime(d.lastGoodUtc), "mono"));
+      tr.appendChild(cell(d.readMs === null ? "—" : `${d.readMs} ms`, "mono"));
+      tr.appendChild(cell(d.requests === null ? "—" : String(d.requests), "mono"));
+      tr.appendChild(cell(d.lastError || "", "error"));
+      return tr;
+    });
+    $("devices").replaceChildren(...deviceRows);
 
     setBadge($("mqttState"), s.mqtt.connected ? "Đã kết nối" : "Chưa kết nối", s.mqtt.connected ? "ok" : "warn");
     $("mqttDetail").textContent = `${s.mqtt.host}:${s.mqtt.port}`;
@@ -165,6 +207,7 @@
     const rows = s.tags.map((t) => {
       const tr = document.createElement("tr");
       tr.appendChild(cell(t.tagId));
+      tr.appendChild(cell(t.device));
       tr.appendChild(cell(t.address, "mono"));
       tr.appendChild(cell(t.dataType));
       tr.appendChild(cell(formatValue(t.value, t.dataType), "value"));

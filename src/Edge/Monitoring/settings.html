@@ -107,7 +107,8 @@
       </table>
     </div>
     <p class="actions"><button id="addTag" type="button">+ Thêm tag</button></p>
-    <!-- The DataTypes the Edge knows (PlcDataType); each row's select is a copy of this one. -->
+    <!-- The DataTypes the Edge knows (PlcDataType) except String, which needs a Length a schema-1 file has no key for;
+         each row's select is a copy of this one. -->
     <select id="dataTypeChoices" hidden>
       <option value="Bool">Bool</option>
       <option value="Byte">Byte</option>
@@ -116,6 +117,8 @@
       <option value="DWord">DWord</option>
       <option value="DInt">DInt</option>
       <option value="Real">Real</option>
+      <option value="LReal">LReal</option>
+      <option value="DTL">DTL</option>
     </select>
   </section>
 

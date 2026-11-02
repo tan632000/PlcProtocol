@@ -250,14 +250,15 @@ internal sealed class TelemetryIngestor(
     }
 
     /// <summary>
-    /// The value the contract accepted (a bool or finite double), re-written as JSON. The raw text could be
-    /// something like <c>1e-20000</c>: valid as a double, but beyond what PostgreSQL's numeric can store.
+    /// The value the contract accepted (a bool, a finite double or a string), re-written as JSON. A number's raw text
+    /// could be something like <c>1e-20000</c>: valid as a double, but beyond what PostgreSQL's numeric can store.
     /// </summary>
     private static string? CanonicalJson(JsonElement? value) => value switch
     {
         null => null,
         { ValueKind: JsonValueKind.True } => "true",
         { ValueKind: JsonValueKind.False } => "false",
+        { ValueKind: JsonValueKind.String } text => JsonSerializer.Serialize(text.GetString()),
         { } number => JsonSerializer.Serialize(number.GetDouble()),
     };
 

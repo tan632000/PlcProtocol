@@ -193,7 +193,7 @@ public class BatchReadTests
             overrides,
             services =>
             {
-                services.AddSingleton<IPlcDriver>(driver);
+                services.UseDriver(driver);
                 services.AddSingleton<ILoggerProvider>(logs);
                 if (clock is not null)
                 {

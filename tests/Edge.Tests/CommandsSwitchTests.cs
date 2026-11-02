@@ -42,6 +42,44 @@ public class CommandsSwitchTests
     }
 
     [Fact]
+    public async Task GlobalSwitchOff_ADeviceWithWritesEnabled_StillDoesNotSubscribeExecuteOrAnswer()
+    {
+        await using var broker = await TestMqttBroker.StartAsync();
+        var subscriptions = RecordSubscriptions(broker);
+        var driver = new FakePlcDriver();
+        var settings = broker.EdgeSettings();
+        foreach (var (key, value) in EdgeTestHost.MultiDevice(new Dictionary<string, string?>
+        {
+            ["Edge:Channels:0:Name"] = "S7",
+            ["Edge:Channels:0:Driver"] = "S7",
+            ["Edge:Channels:0:Devices:0:Name"] = "A",
+            ["Edge:Channels:0:Devices:0:Model"] = "S7-1200",
+            ["Edge:Channels:0:Devices:0:Host"] = "127.0.0.1",
+            ["Edge:Channels:0:Devices:0:WritesEnabled"] = "true",
+            ["Edge:Channels:0:Devices:0:PollIntervalMs"] = "3600000",
+            ["Edge:Channels:0:Devices:0:Tags:0:Name"] = "Speed",
+            ["Edge:Channels:0:Devices:0:Tags:0:Address"] = "DB1.DBW2",
+            ["Edge:Channels:0:Devices:0:Tags:0:DataType"] = "Int",
+            ["Edge:Channels:0:Devices:0:Tags:0:Writable"] = "true",
+        }))
+        {
+            settings[key] = value;
+        }
+
+        settings["Edge:Commands:Enabled"] = "false";
+        await using var edge = EdgeTestHost.Create(settings, services => services.UseDriver(driver), runAgentServices: true);
+        await edge.Host.StartAsync();
+        await edge.Services.GetRequiredService<MqttConnection>().WaitForConnectionAsync(default).WaitAsync(TimeSpan.FromSeconds(15));
+
+        await broker.PublishAsync(CommandsTopic, ContractJson.Serialize(Command() with { TagId = "A.Speed" }));
+        await Task.Delay(2000);
+
+        Assert.Empty(driver.Writes);
+        Assert.DoesNotContain(broker.Received, m => m.Topic == ResultsTopic);
+        Assert.DoesNotContain(subscriptions, s => s == ("test-edge", CommandsTopic));
+    }
+
+    [Fact]
     public async Task Enabled_ExecutesAndAnswers()
     {
         await using var broker = await TestMqttBroker.StartAsync();
@@ -175,7 +213,7 @@ public class CommandsSwitchTests
             settings,
             services =>
             {
-                services.AddSingleton<IPlcDriver>(driver);
+                services.UseDriver(driver);
                 services.AddSingleton<ILoggerProvider>(logs);
             },
             runAgentServices: true);

@@ -14,12 +14,12 @@ public class EdgeHostTests
 
         await edge.Host.StartAsync();
 
-        Assert.IsType<SiemensS7Driver>(edge.Services.GetRequiredService<IPlcDriver>());
+        Assert.IsType<SiemensS7Driver>(edge.Services.GetRequiredService<PlcDeviceRegistry>().Devices[0].Driver!);
         Assert.Same(TimeProvider.System, edge.Services.GetRequiredService<TimeProvider>());
         Assert.Equal("test-edge", edge.Services.GetRequiredService<IOptions<EdgeOptions>>().Value.EdgeId);
 
         // A catalog bound from the wrong section would be empty and still "resolve".
-        var catalog = edge.Services.GetRequiredService<PlcTagCatalog>();
+        var catalog = edge.Services.GetRequiredService<PlcDeviceRegistry>().Devices[0].Catalog;
         Assert.True(catalog.TryGet("Line1.Speed", out var tag));
         Assert.Equal("DB1.DBW2", tag.Address.Canonical);
 

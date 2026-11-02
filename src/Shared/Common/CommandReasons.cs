@@ -24,6 +24,12 @@ public static class CommandReasons
     /// </summary>
     public const string EdgeStorageError = "edge_storage_error";
 
+    /// <summary>The PLC that owns the tag has <c>WritesEnabled=false</c>; nothing was sent to it.</summary>
+    public const string DeviceWritesDisabled = "device_writes_disabled";
+
+    /// <summary>The PLC that owns the tag is disabled (<c>Enabled=false</c>): it is neither read nor written.</summary>
+    public const string DeviceDisabled = "device_disabled";
+
     /// <summary>Every code defined above.</summary>
     public static IReadOnlyList<string> All { get; } =
     [
@@ -39,5 +45,7 @@ public static class CommandReasons
         PlcAccessDenied,
         WriteOutcomeUnknown,
         EdgeStorageError,
+        DeviceWritesDisabled,
+        DeviceDisabled,
     ];
 }

@@ -53,6 +53,59 @@ public class CommandExecutorTests
     }
 
     [Fact]
+    public async Task TwoDevices_ACommandWritesOnlyThroughTheDeviceThatOwnsTheTag()
+    {
+        var (ctx, a, b) = await Context.StartTwoDevicesAsync();
+        await using var _ = ctx;
+
+        await ctx.AssertOutcomeAsync(ctx.Command("B.Speed", "7"), CommandOutcome.Applied, null, stored: true);
+
+        Assert.Empty(a.Writes);
+        var write = Assert.Single(b.Writes);
+        Assert.Equal(("DB1.DBW2", (short)7), (write.Address.Canonical, (short)write.Value));
+        await ctx.AssertOutcomeAsync(ctx.Command("B.Counter", "5"), CommandOutcome.Rejected, CommandReasons.TagNotWritable, stored: true);
+        await ctx.AssertOutcomeAsync(ctx.Command("C.Speed", "5"), CommandOutcome.Rejected, CommandReasons.UnknownTag, stored: true);
+        Assert.Single(b.Writes);
+    }
+
+    [Theory]
+    [InlineData("WritesEnabled", "false", CommandReasons.DeviceWritesDisabled)]
+    [InlineData("Enabled", "false", CommandReasons.DeviceDisabled)]
+    public async Task TwoDevices_ADeviceSwitchRefusesWithoutAnyDriverCall(string key, string value, string reason)
+    {
+        var (ctx, a, b) = await Context.StartTwoDevicesAsync(new Dictionary<string, string?> { [$"Edge:Channels:0:Devices:1:{key}"] = value });
+        await using var _ = ctx;
+
+        await ctx.AssertOutcomeAsync(ctx.Command("B.Speed", "7"), CommandOutcome.Rejected, reason, stored: true);
+
+        Assert.Empty(a.Writes);
+        Assert.Empty(b.Writes);
+        await ctx.AssertOutcomeAsync(ctx.Command("A.Speed", "7"), CommandOutcome.Applied, null, stored: true);
+    }
+
+    [Fact]
+    public async Task TwoDevices_DeviceSwitchesAreCheckedBeforeEachOtherAndBeforeTheTag()
+    {
+        var (disabled, _, _) = await Context.StartTwoDevicesAsync(new Dictionary<string, string?>
+        {
+            ["Edge:Channels:0:Devices:1:Enabled"] = "false",
+            ["Edge:Channels:0:Devices:1:WritesEnabled"] = "false",
+        });
+        await using (disabled)
+        {
+            await disabled.AssertOutcomeAsync(disabled.Command("B.Speed", "7"), CommandOutcome.Rejected, CommandReasons.DeviceDisabled, stored: true);
+        }
+
+        var (locked, _, b) = await Context.StartTwoDevicesAsync(new Dictionary<string, string?> { ["Edge:Channels:0:Devices:1:WritesEnabled"] = "false" });
+        await using (locked)
+        {
+            // B.Counter is not writable either: the device's switch answers first.
+            await locked.AssertOutcomeAsync(locked.Command("B.Counter", "5"), CommandOutcome.Rejected, CommandReasons.DeviceWritesDisabled, stored: true);
+            Assert.Empty(b.Writes);
+        }
+    }
+
+    [Fact]
     public async Task WriteExceptions_MapToOutcomes()
     {
         await using var ctx = await Context.StartAsync();
@@ -337,11 +390,58 @@ public class CommandExecutorTests
                 },
                 services =>
                 {
-                    services.AddSingleton<IPlcDriver>(driver);
+                    services.UseDriver(driver);
                     services.AddSingleton<TimeProvider>(clock);
                 });
             await edge.Host.StartAsync();
             return new Context(edge, driver, clock);
+        }
+
+        /// <summary>Two S7 devices A and B with writes on; <paramref name="overrides"/> change either.</summary>
+        public static async Task<(Context Context, FakePlcDriver A, FakePlcDriver B)> StartTwoDevicesAsync(
+            Dictionary<string, string?>? overrides = null)
+        {
+            var a = new FakePlcDriver();
+            var b = new FakePlcDriver();
+            var clock = new MutableClock(T0);
+            var settings = EdgeTestHost.MultiDevice(new Dictionary<string, string?>
+            {
+                ["Edge:Channels:0:Name"] = "S7",
+                ["Edge:Channels:0:Driver"] = "S7",
+                ["Edge:Channels:0:Devices:0:Name"] = "A",
+                ["Edge:Channels:0:Devices:0:Model"] = "S7-1200",
+                ["Edge:Channels:0:Devices:0:Host"] = "127.0.0.1",
+                ["Edge:Channels:0:Devices:0:WritesEnabled"] = "true",
+                ["Edge:Channels:0:Devices:0:Tags:0:Name"] = "Speed",
+                ["Edge:Channels:0:Devices:0:Tags:0:Address"] = "DB1.DBW2",
+                ["Edge:Channels:0:Devices:0:Tags:0:DataType"] = "Int",
+                ["Edge:Channels:0:Devices:0:Tags:0:Writable"] = "true",
+                ["Edge:Channels:0:Devices:1:Name"] = "B",
+                ["Edge:Channels:0:Devices:1:Model"] = "S7-1200",
+                ["Edge:Channels:0:Devices:1:Host"] = "127.0.0.2",
+                ["Edge:Channels:0:Devices:1:WritesEnabled"] = "true",
+                ["Edge:Channels:0:Devices:1:Tags:0:Name"] = "Speed",
+                ["Edge:Channels:0:Devices:1:Tags:0:Address"] = "DB1.DBW2",
+                ["Edge:Channels:0:Devices:1:Tags:0:DataType"] = "Int",
+                ["Edge:Channels:0:Devices:1:Tags:0:Writable"] = "true",
+                ["Edge:Channels:0:Devices:1:Tags:1:Name"] = "Counter",
+                ["Edge:Channels:0:Devices:1:Tags:1:Address"] = "DB1.DBD8",
+                ["Edge:Channels:0:Devices:1:Tags:1:DataType"] = "DInt",
+            });
+            foreach (var (key, value) in overrides ?? [])
+            {
+                settings[key] = value;
+            }
+
+            var edge = EdgeTestHost.Create(
+                settings,
+                services =>
+                {
+                    services.AddSingleton<IPlcDriverFactory>(new FakeDriverFactory(device => device.Name == "A" ? a : b));
+                    services.AddSingleton<TimeProvider>(clock);
+                });
+            await edge.Host.StartAsync();
+            return (new Context(edge, a, clock), a, b);
         }
 
         public DeviceCommand Command(

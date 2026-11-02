@@ -11,6 +11,8 @@ public sealed class CloudDbContext(DbContextOptions<CloudDbContext> options) : D
 
     public DbSet<CommandRow> Commands => Set<CommandRow>();
 
+    public DbSet<EdgeInventoryRow> EdgeInventory => Set<EdgeInventoryRow>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.Entity<TelemetryRow>(e =>
@@ -71,6 +73,17 @@ public sealed class CloudDbContext(DbContextOptions<CloudDbContext> options) : D
                 .HasDatabaseName("ux_commands_issuer_key");
             e.HasIndex(c => new { c.Status, c.ExpiresAtUtc }).HasDatabaseName("ix_commands_status_expiry");
             e.HasIndex(c => new { c.EdgeId, c.CreatedUtc }).HasDatabaseName("ix_commands_edge_created");
+        });
+
+        modelBuilder.Entity<EdgeInventoryRow>(e =>
+        {
+            e.ToTable("edge_inventory");
+            e.HasKey(i => i.EdgeId).HasName("pk_edge_inventory");
+            e.Property(i => i.EdgeId).HasColumnName("edge_id");
+            e.Property(i => i.BootId).HasColumnName("boot_id");
+            e.Property(i => i.Round).HasColumnName("round");
+            e.Property(i => i.ReceivedUtc).HasColumnName("received_utc");
+            e.Property(i => i.Document).HasColumnName("document").HasColumnType("jsonb");
         });
     }
 }

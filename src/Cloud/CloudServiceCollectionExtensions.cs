@@ -58,6 +58,7 @@ public static class CloudServiceCollectionExtensions
         services.TryAddSingleton<CloudMqttConnection>();
         services.AddHostedService(p => p.GetRequiredService<CloudMqttConnection>());
         services.AddHostedService<TelemetryIngestor>();
+        services.AddHostedService<InventoryIngestor>();
         services.AddHostedService<RetentionJob>();
 
         services.TryAddSingleton<ReadinessState>();
@@ -68,6 +69,7 @@ public static class CloudServiceCollectionExtensions
         services.AddCloudProblemDetails();
         services.TryAddEnumerable(ServiceDescriptor.Singleton<IEndpointModule, EdgesEndpoints>());
         services.TryAddEnumerable(ServiceDescriptor.Singleton<IEndpointModule, TelemetryEndpoints>());
+        services.TryAddEnumerable(ServiceDescriptor.Singleton<IEndpointModule, DevicesEndpoints>());
         services.TryAddEnumerable(ServiceDescriptor.Singleton<IEndpointModule, ScadaEndpoints>());
 
         services.AddSignalR();

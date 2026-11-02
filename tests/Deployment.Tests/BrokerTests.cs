@@ -93,6 +93,57 @@ public class BrokerTests(BrokerFixture broker) : IClassFixture<BrokerFixture>
     }
 
     [Fact]
+    public Task Inventory_OnlyOwnerWrites_CloudReads() => InventoryAcl.ProbeAsync(broker);
+
+    [Fact]
+    public void AclFiles_DifferOnlyByTheCommandsWrite()
+    {
+        static List<string> Rules(string file) => File.ReadAllLines(Path.Combine(Repo.Root, "deployments", "mosquitto", file))
+            .Select(l => l.Trim())
+            .Where(l => l.Length > 0 && !l.StartsWith('#'))
+            .ToList();
+
+        var readOnly = Rules("acl");
+        var commands = Rules("acl-commands");
+
+        Assert.Equal(["topic write iiot/+/commands"], commands.Except(readOnly));
+        Assert.Equal(readOnly, commands.Where(l => l != "topic write iiot/+/commands"));
+    }
+
+    [Fact]
+    public async Task OfflineCloud_QueuesTelemetryButNoInventory()
+    {
+        // The Cloud's session holds telemetry at QoS 1 and inventory at QoS 0, as the Cloud subscribes.
+        await MqttClientHelper.ResetSessionAsync(broker, Cloud);
+        await using (var cloud = await MqttClientHelper.ConnectAsync(broker, Cloud, broker.Password(Cloud), cleanStart: false))
+        {
+            await cloud.SubscribeAsync(MqttQualityOfServiceLevel.AtLeastOnce, "iiot/+/telemetry");
+            var inventory = await cloud.SubscribeAsync(MqttQualityOfServiceLevel.AtMostOnce, "iiot/+/inventory");
+            Assert.Equal(MqttClientSubscribeResultCode.GrantedQoS0, Assert.Single(inventory.Items).ResultCode);
+        }
+
+        try
+        {
+            await using (var line1 = await MqttClientHelper.ConnectAsync(broker, Line1, broker.Password(Line1)))
+            {
+                // Both are accepted: the inventory is missing later only because nothing queues it.
+                Assert.Equal(MqttClientPublishReasonCode.Success, (await line1.PublishAsync($"iiot/{Line1}/inventory", "inventory-while-offline")).ReasonCode);
+                Assert.Equal(MqttClientPublishReasonCode.Success, (await line1.PublishAsync($"iiot/{Line1}/telemetry", "telemetry-while-offline")).ReasonCode);
+            }
+
+            await using var back = await MqttClientHelper.ConnectAsync(broker, Cloud, broker.Password(Cloud), cleanStart: false);
+            await back.WaitForAsync("telemetry-while-offline");
+            await Task.Delay(300);
+
+            Assert.DoesNotContain("inventory-while-offline", back.Payloads);
+        }
+        finally
+        {
+            await MqttClientHelper.ResetSessionAsync(broker, Cloud);
+        }
+    }
+
+    [Fact]
     public async Task TelemetryAcks_OnlyCloudWrites_OnlyOwnerReads()
     {
         await using var line1 = await MqttClientHelper.ConnectAsync(broker, Line1, broker.Password(Line1));
@@ -289,6 +340,9 @@ public class CommandsBrokerTests(CommandsBrokerFixture broker) : IClassFixture<C
     private const string Cloud = "iiot-cloud";
     private const string Line1 = "line1-edge01";
     private const string Line2 = "line2-edge01";
+
+    [Fact]
+    public Task Inventory_OnlyOwnerWrites_CloudReads() => InventoryAcl.ProbeAsync(broker);
 
     [Fact]
     public async Task EdgeAcl_OwnTopicsOnly()
@@ -653,6 +707,40 @@ public class BrokerFixture : IAsyncLifetime, IAsyncDisposable
     async ValueTask IAsyncDisposable.DisposeAsync() => await DisposeAsync();
 }
 
+/// <summary>The inventory topic under either ACL file: each Edge writes only its own, only the Cloud reads them.</summary>
+internal static class InventoryAcl
+{
+    private const string Cloud = "iiot-cloud";
+    private const string Line1 = "line1-edge01";
+    private const string Line2 = "line2-edge01";
+
+    public static async Task ProbeAsync(BrokerFixture broker)
+    {
+        await using var cloud = await MqttClientHelper.ConnectAsync(broker, Cloud, broker.Password(Cloud));
+        var granted = await cloud.SubscribeAsync(MqttQualityOfServiceLevel.AtMostOnce, "iiot/+/inventory");
+        Assert.Equal(MqttClientSubscribeResultCode.GrantedQoS0, Assert.Single(granted.Items).ResultCode);
+        await using var line2 = await MqttClientHelper.ConnectAsync(broker, Line2, broker.Password(Line2));
+        await line2.SubscribeAsync("iiot/+/inventory", $"iiot/{Line1}/inventory", $"iiot/{Line2}/inventory");
+        await using var line1 = await MqttClientHelper.ConnectAsync(broker, Line1, broker.Password(Line1));
+
+        var own = await line1.PublishAsync($"iiot/{Line1}/inventory", "own-inventory");
+        var spoofed = await line1.PublishAsync($"iiot/{Line2}/inventory", "spoofed-inventory");
+        var line2Own = await line2.PublishAsync($"iiot/{Line2}/inventory", "line2-own-inventory");
+
+        Assert.Equal(MqttClientPublishReasonCode.Success, own.ReasonCode);
+        Assert.Equal(MqttClientPublishReasonCode.NotAuthorized, spoofed.ReasonCode);
+        Assert.Equal(MqttClientPublishReasonCode.Success, line2Own.ReasonCode);
+        await cloud.WaitForAsync("own-inventory");
+        await cloud.WaitForAsync("line2-own-inventory");
+        await line1.PublishAsync($"iiot/{Line1}/inventory", "marker");
+        await cloud.WaitForAsync("marker");
+        await Task.Delay(300);
+
+        Assert.DoesNotContain("spoofed-inventory", cloud.Payloads);
+        Assert.Empty(line2.Payloads); // no Edge reads inventory, its own or another's
+    }
+}
+
 /// <summary>The same broker with the write-mode ACL.</summary>
 public sealed class CommandsBrokerFixture : BrokerFixture
 {
@@ -735,20 +823,23 @@ public sealed class MqttClientHelper : IAsyncDisposable
         await using var reset = await ConnectAsync(broker, identity, broker.Password(identity), cleanStart: true);
     }
 
-    public async Task<MqttClientSubscribeResult> SubscribeAsync(params string[] filters)
+    public Task<MqttClientSubscribeResult> SubscribeAsync(params string[] filters) =>
+        SubscribeAsync(MqttQualityOfServiceLevel.AtLeastOnce, filters);
+
+    public async Task<MqttClientSubscribeResult> SubscribeAsync(MqttQualityOfServiceLevel qos, params string[] filters)
     {
         var options = new MqttClientSubscribeOptionsBuilder();
         foreach (var filter in filters)
         {
-            options.WithTopicFilter(f => f.WithTopic(filter).WithAtLeastOnceQoS());
+            options.WithTopicFilter(f => f.WithTopic(filter).WithQualityOfServiceLevel(qos));
         }
 
         // A refused filter (SUBACK error) is a valid outcome for the denial probes; callers that care read the result.
         return await _client.SubscribeAsync(options.Build());
     }
 
-    /// <summary>QoS 1; a denied publish (failed PUBACK or a closed connection) is not an error here.</summary>
-    public async Task PublishAsync(string topic, string payload, bool retain = false) =>
+    /// <summary>QoS 1; a denied publish (failed PUBACK or a closed connection) is not an error here, it is the result.</summary>
+    public async Task<MqttClientPublishResult> PublishAsync(string topic, string payload, bool retain = false) =>
         await _client.PublishAsync(new MqttApplicationMessageBuilder()
             .WithTopic(topic)
             .WithPayload(payload)

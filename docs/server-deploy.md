@@ -293,6 +293,10 @@ Rồi chạy lại CD cho đúng sha đó: GitHub → Actions → CD → Run wor
 server đã ở sha đó và chỉ thay Cloud. Nếu đổi `mosquitto` hoặc ACL, các Edge mất kết nối vài giây rồi tự nối lại
 (session MQTT vẫn giữ).
 
+> Commit thêm danh sách PLC/tag (topic `iiot/+/inventory`) đổi `deployments/mosquitto/acl` và `acl-commands`, nên CD
+> báo `manual upgrade needed` một lần: nâng broker như trên (service `mosquitto`) trước khi CD deploy Cloud của commit
+> đó. Cloud mới subscribe `iiot/+/inventory`; với ACL cũ nó không kết nối được broker và ngừng nhận cả telemetry.
+
 > Keycloak chạy `start-dev` không có volume: tạo lại container sẽ mất mọi thay đổi làm tay trong trang admin (realm được
 > nạp lại từ `deployments/keycloak/iiot-realm.json`). Muốn thay đổi bền thì sửa file realm trong git.
 

@@ -1,6 +1,7 @@
 using System.Text.Json;
 using IndustrialIot.Edge.Drivers;
 using IndustrialIot.Edge.Drivers.Models;
+using IndustrialIot.Edge.Drivers.Slmp;
 using IndustrialIot.Shared.Common;
 
 namespace IndustrialIot.Edge.Tests;
@@ -160,6 +161,120 @@ public class PlcTagCatalogTests
         var catalog = new PlcTagCatalog(new PlcTagCatalogOptions { Tags = tags });
 
         Assert.All(tags, t => Assert.True(catalog.TryGet(t.TagId, out _), scenario));
+    }
+
+    [Theory]
+    [InlineData("String", "\"ABCDE\"", true)]
+    [InlineData("String", "\"ABCDEF\"", false)] // longer than Length 5
+    [InlineData("String", "\"\u4E2D\"", false)] // not one byte per character
+    [InlineData("String", "5", false)]
+    [InlineData("LReal", "1.5e300", true)]
+    [InlineData("LReal", "\"1.5\"", false)]
+    [InlineData("DTL", "\"2026-11-02T10:15:30.123\"", true)]
+    [InlineData("DTL", "\"2026-11-02 10:15:30\"", false)]
+    [InlineData("DTL", "\"2026-13-02T10:15:30.123\"", false)]
+    [InlineData("DTL", "\"1969-12-31T23:59:59.999\"", false)]
+    public void NewTypes_AreNormalizedOrRefusedBeforeAnyWrite(string type, string json, bool allowed)
+    {
+        var dataType = Enum.Parse<PlcDataType>(type);
+        var catalog = new PlcTagCatalog(new PlcTagCatalogOptions
+        {
+            Tags = [new PlcTagDefinition { TagId = "t", Address = "DB1.DBB0", DataType = dataType, Writable = true, Length = dataType == PlcDataType.String ? 5 : null }],
+        });
+
+        var decision = catalog.EvaluateWrite("t", Json(json));
+
+        Assert.Equal(allowed, decision.Allowed);
+        Assert.Equal(allowed ? null : CommandReasons.InvalidValue, decision.Reason);
+    }
+
+    [Fact]
+    public void AString_IsPaddedToItsLength_AndAnLRealBoundDoesNotOverflow()
+    {
+        var catalog = new PlcTagCatalog(new PlcTagCatalogOptions
+        {
+            Tags =
+            [
+                new PlcTagDefinition { TagId = "s", Address = "DB1.DBB0", DataType = PlcDataType.String, Writable = true, Length = 5 },
+                new PlcTagDefinition { TagId = "l", Address = "DB1.DBB8", DataType = PlcDataType.LReal, Writable = true, Max = 1 },
+            ],
+        });
+
+        Assert.Equal("AB\0\0\0", catalog.EvaluateWrite("s", Json("\"AB\"")).NormalizedValue);
+        Assert.Equal(CommandReasons.ValueOutOfRange, catalog.EvaluateWrite("l", Json("1.5e300")).Reason);
+        Assert.True(catalog.EvaluateWrite("l", Json("0.5")).Allowed);
+    }
+
+    [Theory]
+    [InlineData("D100", "DInt", null, "D101", "Int", true)] // a writable DInt covers D100-D101
+    [InlineData("D100", "Int", null, "D101", "Int", false)]
+    [InlineData("D200", "String", 3, "D201", "Int", true)] // String 3 covers D200-D201
+    [InlineData("D200", "String", 2, "D201", "Int", false)]
+    [InlineData("D300", "LReal", null, "D303", "Int", true)]
+    [InlineData("M5", "Bool", null, "M6", "Bool", false)]
+    [InlineData("Y7", "Bool", null, "Y7", "Bool", true)]
+    public void SlmpOverlap_UsesTheRealSizes(string writable, string writableType, int? length, string other, string otherType, bool overlaps)
+    {
+        PlcTagDefinition[] tags =
+        [
+            new() { TagId = "w", Address = writable, DataType = Enum.Parse<PlcDataType>(writableType), Writable = true, Length = length },
+            new() { TagId = "o", Address = other, DataType = Enum.Parse<PlcDataType>(otherType) },
+        ];
+
+        var build = () => new PlcTagCatalog(new PlcTagCatalogOptions { Tags = tags }, new SlmpAddressSyntax());
+
+        if (overlaps)
+        {
+            Assert.Contains("overlaps", Assert.Throws<InvalidOperationException>(build).Message, StringComparison.Ordinal);
+        }
+        else
+        {
+            build();
+        }
+    }
+
+    [Theory]
+    [InlineData("DB1.DBB10", "String", 10, "DB1.DBW20", "Int", true)] // STRING[10] covers bytes 10-21
+    [InlineData("DB1.DBB10", "String", 10, "DB1.DBW22", "Int", false)]
+    [InlineData("DB1.DBB0", "LReal", null, "DB1.DBB7", "Byte", true)]
+    [InlineData("DB1.DBB0", "DTL", null, "DB1.DBX11.7", "Bool", true)]
+    [InlineData("DB1.DBB0", "DTL", null, "DB1.DBB12", "Byte", false)]
+    public void S7Overlap_UsesTheNewTypesSizes(string writable, string writableType, int? length, string other, string otherType, bool overlaps)
+    {
+        PlcTagDefinition[] tags =
+        [
+            new() { TagId = "w", Address = writable, DataType = Enum.Parse<PlcDataType>(writableType), Writable = true, Length = length },
+            new() { TagId = "o", Address = other, DataType = Enum.Parse<PlcDataType>(otherType) },
+        ];
+
+        var build = () => new PlcTagCatalog(new PlcTagCatalogOptions { Tags = tags });
+
+        if (overlaps)
+        {
+            Assert.Contains("overlaps", Assert.Throws<InvalidOperationException>(build).Message, StringComparison.Ordinal);
+        }
+        else
+        {
+            build();
+        }
+    }
+
+    [Fact]
+    public void Union_OfAnS7AndAnSlmpCatalog_HoldsBoth_AndKeepsIdsUnique()
+    {
+        var s7 = new PlcTagCatalog(new PlcTagCatalogOptions { Tags = [Tag("A.Speed", "DB1.DBW2", PlcDataType.Int, writable: true)] });
+        var fx = new PlcTagCatalog(new PlcTagCatalogOptions { Tags = [Tag("Press.D100", "D100", PlcDataType.Int)] }, new SlmpAddressSyntax());
+        var otherS7 = new PlcTagCatalog(new PlcTagCatalogOptions { Tags = [Tag("B.Speed", "DB1.DBW2", PlcDataType.Int, writable: true)] });
+
+        var union = PlcTagCatalog.Union([s7, fx]);
+
+        Assert.Equal(["A.Speed", "Press.D100"], union.Tags.Select(t => t.TagId));
+        Assert.True(union.TryGet("press.d100", out var tag));
+        Assert.Equal("D100", tag.Address.Canonical);
+
+        // Two PLCs may use the same address: writable overlap is a rule within one PLC.
+        Assert.Equal(2, PlcTagCatalog.Union([s7, otherS7]).Tags.Count);
+        Assert.Throws<InvalidOperationException>(() => PlcTagCatalog.Union([s7, s7]));
     }
 
     private static PlcTagDefinition Tag(

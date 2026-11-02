@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text.Json;
+using IndustrialIot.Edge.Configuration;
 using IndustrialIot.Edge.Drivers;
 using IndustrialIot.Edge.Drivers.Slmp;
 using Microsoft.AspNetCore.Http;
@@ -77,9 +78,7 @@ public sealed class PlcConnectionTester(
     SettingsPassword password,
     EdgeSettingsFile file,
     PlcTestLimiter limiter,
-    IPlcDriver runningDriver,
-    IOptions<PlcProtocolOptions> runningProtocol,
-    IServiceProvider services,
+    PlcDeviceRegistry registry,
     ILoggerFactory loggerFactory,
     ILogger<PlcConnectionTester> logger)
 {
@@ -98,8 +97,25 @@ public sealed class PlcConnectionTester(
 
         var root = body.RootElement;
         var errors = new List<SettingsError>();
-        var proposed = Proposed(root, errors);
-        if (proposed is null)
+        ProposedPlc? proposed = null;
+        DeviceRuntime? named = null;
+        if (root.ValueKind == JsonValueKind.Object && root.TryGetProperty("device", out _))
+        {
+            named = Named(root, errors);
+        }
+        else if (registry.Devices.Count > 1)
+        {
+            // Proposed settings without a device name come from the single-PLC page, which cannot say which PLC it means.
+            await SettingsService.Reply(context, StatusCodes.Status409Conflict,
+                new { error = "several-plcs", message = "This Edge has several PLCs; name the PLC to test." }).ConfigureAwait(false);
+            return;
+        }
+        else
+        {
+            proposed = Proposed(root, errors);
+        }
+
+        if (proposed is null && named is null)
         {
             await SettingsService.Reply(context, StatusCodes.Status400BadRequest, new { ok = false, errors }).ConfigureAwait(false);
             return;
@@ -124,7 +140,9 @@ public sealed class PlcConnectionTester(
         var clock = Stopwatch.StartNew();
         try
         {
-            reachable = await ReachableAsync(proposed, context.RequestAborted).ConfigureAwait(false);
+            reachable = named is not null
+                ? await ReachableAsync(named, context.RequestAborted).ConfigureAwait(false)
+                : await ReachableAsync(proposed!, context.RequestAborted).ConfigureAwait(false);
         }
         finally
         {
@@ -132,16 +150,45 @@ public sealed class PlcConnectionTester(
         }
 
         var result = reachable ? "ok" : "unreachable";
-        logger.LogInformation("PLC connection test {Protocol} {Host}:{Port}: {Result}.", proposed.Protocol, proposed.Host, proposed.Port, result);
+        if (named is not null)
+        {
+            logger.LogInformation("PLC connection test {Device} ({Model}) {Host}: {Result}.", named.Name, named.Device.Model, named.Device.Host, result);
+        }
+        else
+        {
+            logger.LogInformation("PLC connection test {Protocol} {Host}:{Port}: {Result}.", proposed!.Protocol, proposed.Host, proposed.Port, result);
+        }
         await SettingsService.Reply(context, StatusCodes.Status200OK,
             new { result, elapsedMs = Math.Round(clock.Elapsed.TotalMilliseconds, 1) }).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// A PLC of this Edge: through its running driver, which keeps its single connection; a disabled one with a driver of
+    /// its kind made for this test and disposed right after.
+    /// </summary>
+    private async Task<bool> ReachableAsync(DeviceRuntime device, CancellationToken ct)
+    {
+        if (device.Driver is { } running)
+        {
+            return await running.IsReachableAsync(ct).ConfigureAwait(false);
+        }
+
+        var driver = new PlcDriverFactory(loggerFactory).Create(device.Device);
+        try
+        {
+            return await driver.IsReachableAsync(ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            await ((IAsyncDisposable)driver).DisposeAsync().ConfigureAwait(false);
+        }
+    }
+
     private async Task<bool> ReachableAsync(ProposedPlc proposed, CancellationToken ct)
     {
-        if (IsRunningPlc(proposed))
+        if (RunningDriver(proposed) is { } running)
         {
-            return await runningDriver.IsReachableAsync(ct).ConfigureAwait(false);
+            return await running.IsReachableAsync(ct).ConfigureAwait(false);
         }
 
         IPlcDriver driver = proposed.Protocol == PlcProtocol.Slmp
@@ -157,18 +204,43 @@ public sealed class PlcConnectionTester(
         }
     }
 
-    private bool IsRunningPlc(ProposedPlc proposed)
+    /// <summary>
+    /// The running driver of the enabled device at <paramref name="proposed"/>'s protocol, host and port, which keeps
+    /// that PLC's single connection; null when no device of this Edge reads that PLC.
+    /// </summary>
+    private IPlcDriver? RunningDriver(ProposedPlc proposed) => registry.Devices
+        .Where(device => device.Driver is not null && device.Device.Driver != PlcDriverKind.Mc1E) // the page proposes S7 or SLMP only
+        .FirstOrDefault(device => Endpoint(device.Device) is var (protocol, port)
+            && protocol == proposed.Protocol
+            && string.Equals(device.Device.Host, proposed.Host, StringComparison.OrdinalIgnoreCase)
+            && port == proposed.Port)
+        ?.Driver;
+
+    private static (PlcProtocol Protocol, int Port) Endpoint(ResolvedDevice device) => device.Driver == PlcDriverKind.Slmp3E
+        ? (PlcProtocol.Slmp, PlcDeviceRegistry.SlmpOptions(device).Port)
+        : (PlcProtocol.S7, PlcDeviceRegistry.S7Options(device).Port);
+
+    /// <summary>A PLC of this Edge by name: <c>{"password": ..., "device": "Line1"}</c>, tested with its own settings.</summary>
+    private DeviceRuntime? Named(JsonElement root, List<SettingsError> errors)
     {
-        PlcProtocolOptions.TryParse(runningProtocol.Value.Protocol, out var running);
-        if (running != proposed.Protocol)
+        foreach (var property in root.EnumerateObject())
         {
-            return false;
+            if (property.Name is not ("password" or "device"))
+            {
+                errors.Add(new SettingsError(property.Name, "Unknown key."));
+            }
         }
 
-        var (host, port) = running == PlcProtocol.Slmp
-            ? (services.GetRequiredService<IOptions<SlmpOptions>>().Value.Host, services.GetRequiredService<IOptions<SlmpOptions>>().Value.Port)
-            : (services.GetRequiredService<IOptions<SiemensS7Options>>().Value.Host, services.GetRequiredService<IOptions<SiemensS7Options>>().Value.Port);
-        return string.Equals(host, proposed.Host, StringComparison.OrdinalIgnoreCase) && port == proposed.Port;
+        var name = root.GetProperty("device");
+        var runtime = name.ValueKind == JsonValueKind.String
+            ? registry.Devices.FirstOrDefault(d => d.Name.Equals(name.GetString(), StringComparison.OrdinalIgnoreCase))
+            : null;
+        if (runtime is null)
+        {
+            errors.Add(new SettingsError("device", "Unknown PLC: give the name of a PLC of this Edge."));
+        }
+
+        return errors.Count > 0 ? null : runtime;
     }
 
     /// <summary>Shape, binding and the drivers' own option validators; errors name key paths only.</summary>

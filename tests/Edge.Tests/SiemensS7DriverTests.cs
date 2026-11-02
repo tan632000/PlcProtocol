@@ -15,6 +15,58 @@ public class SiemensS7DriverTests
     private static readonly PlcAddress BoolAddress = PlcAddressParser.Parse("DB1.DBX0.1");
 
     [Fact]
+    public async Task AStringWrite_WhoseLengthIsNotThePlcsDeclaredMaximum_WritesNothing()
+    {
+        await using var server = FakeS7Server.StartWithMemory(pduSize: 240);
+        server.Seed("DB1.DBB10", PlcValueConverterTests.S7String(max: 10, "OLD"));
+        await using var driver = new SiemensS7Driver(Options.Create(new SiemensS7Options { Host = "127.0.0.1", Port = server.Port, TimeoutMs = 3000 }));
+        var before = server.Peek("DB1.DBB10", 32);
+
+        // The tag says Length 20; the PLC holds STRING[10]: 15 characters would run into the next variable.
+        var error = await Record.ExceptionAsync(() => driver.WriteAsync(
+            PlcAddressParser.Parse("DB1.DBB10"), PlcDataType.String, "ABCDEFGHIJKLMNO".PadRight(20, '\0'), CancellationToken.None));
+
+        Assert.Contains("STRING length mismatch", Assert.IsType<PlcAccessDeniedException>(error).Message, StringComparison.Ordinal);
+        Assert.Equal(before, server.Peek("DB1.DBB10", 32));
+    }
+
+    [Fact]
+    public async Task AWriteToTheInputArea_IsRefusedByTheDriverBeforeAnyIo()
+    {
+        await using var server = FakeS7Server.StartWithMemory(pduSize: 240);
+        await using var driver = new SiemensS7Driver(Options.Create(new SiemensS7Options { Host = "127.0.0.1", Port = server.Port, TimeoutMs = 3000 }));
+
+        var error = await Record.ExceptionAsync(() => driver.WriteAsync(PlcAddressParser.Parse("IW64"), PlcDataType.Int, (short)1, CancellationToken.None));
+
+        Assert.IsType<PlcAccessDeniedException>(error);
+        Assert.Equal(0, server.AcceptCount);
+    }
+
+    [Fact]
+    public async Task NewTypeWrites_ReadBack_AndAStringKeepsItsDeclaredMaximum()
+    {
+        await using var server = FakeS7Server.StartWithMemory(pduSize: 240);
+        server.Seed("DB1.DBB10", PlcValueConverterTests.S7String(max: 10, "OLDTEXT"));
+        await using var driver = new SiemensS7Driver(Options.Create(new SiemensS7Options { Host = "127.0.0.1", Port = server.Port, TimeoutMs = 3000 }));
+        var dtl = new DateTime(2026, 11, 2, 10, 15, 30, 123);
+
+        await driver.WriteAsync(PlcAddressParser.Parse("DB1.DBB10"), PlcDataType.String, "AB\0\0\0\0\0\0\0\0", CancellationToken.None);
+        await driver.WriteAsync(PlcAddressParser.Parse("DB1.DBB30"), PlcDataType.LReal, 1.5e300, CancellationToken.None);
+        await driver.WriteAsync(PlcAddressParser.Parse("DB1.DBB40"), PlcDataType.DTL, dtl, CancellationToken.None);
+
+        var stored = server.Peek("DB1.DBB10", 4);
+        Assert.Equal([10, 2, (byte)'A', (byte)'B'], stored); // byte 0, the declared maximum, untouched
+        var results = await driver.ReadAsync(
+        [
+            new ResolvedTag("s", PlcAddressParser.Parse("DB1.DBB10"), PlcDataType.String, false, null, null, Length: 10),
+            new ResolvedTag("l", PlcAddressParser.Parse("DB1.DBB30"), PlcDataType.LReal, false, null, null),
+            new ResolvedTag("t", PlcAddressParser.Parse("DB1.DBB40"), PlcDataType.DTL, false, null, null),
+        ], CancellationToken.None);
+        Assert.Equal(["AB", 1.5e300, "2026-11-02T10:15:30.123"], results.Select(r => r.Value));
+        Assert.Equal(2, server.Peek("DB1.DBB44", 1)[0]); // weekday: 2026-11-02 is a Monday (1 = Sunday)
+    }
+
+    [Fact]
     public async Task ClosedPort_ThrowsUnavailable()
     {
         await using var server = FakeS7Server.Start(FakeS7Mode.ClosedPort);

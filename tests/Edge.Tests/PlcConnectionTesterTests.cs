@@ -165,6 +165,125 @@ public sealed class PlcConnectionTesterTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task SeveralPlcs_Is409_AndNothingConnects()
+    {
+        var driver = new FakePlcDriver();
+        await using var edge = EdgeTestHost.Create(
+            EdgeTestHost.MultiDevice(new Dictionary<string, string?>
+            {
+                ["Edge:Channels:0:Name"] = "S7",
+                ["Edge:Channels:0:Driver"] = "S7",
+                ["Edge:Channels:0:Devices:0:Name"] = "A",
+                ["Edge:Channels:0:Devices:0:Model"] = "S7-1200",
+                ["Edge:Channels:0:Devices:0:Host"] = "127.0.0.1",
+                ["Edge:Channels:0:Devices:1:Name"] = "B",
+                ["Edge:Channels:0:Devices:1:Model"] = "S7-1200",
+                ["Edge:Channels:0:Devices:1:Host"] = "127.0.0.2",
+            }),
+            services => services.UseDriver(driver));
+        var tester = edge.Services.GetRequiredService<PlcConnectionTester>();
+        var context = new Microsoft.AspNetCore.Http.DefaultHttpContext();
+        context.Request.ContentType = "application/json";
+        context.Request.Body = new MemoryStream(Encoding.UTF8.GetBytes(Body(S7(ClosedPort()), Password)));
+        context.Response.Body = new MemoryStream();
+
+        await tester.TestAsync(context, _port);
+
+        Assert.Equal((int)HttpStatusCode.Conflict, context.Response.StatusCode);
+        context.Response.Body.Position = 0;
+        Assert.Equal("several-plcs", JsonDocument.Parse(context.Response.Body).RootElement.GetProperty("error").GetString());
+    }
+
+    [Fact]
+    public async Task TheOnlyDeviceOfAMultiDeviceEdge_IsAnsweredByItsRunningDriver()
+    {
+        var driver = new ReachabilityDriver();
+        var plcPort = ClosedPort();
+        await using var edge = EdgeTestHost.Create(
+            EdgeTestHost.MultiDevice(new Dictionary<string, string?>
+            {
+                ["Edge:Channels:0:Name"] = "S7",
+                ["Edge:Channels:0:Driver"] = "S7",
+                ["Edge:Channels:0:Devices:0:Name"] = "A",
+                ["Edge:Channels:0:Devices:0:Model"] = "S7-1200",
+                ["Edge:Channels:0:Devices:0:Host"] = "127.0.0.1",
+                ["Edge:Channels:0:Devices:0:Port"] = plcPort.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            }),
+            services => services.UseDriver(driver));
+        SettingsPassword.Store(SettingsPassword.PathFor(edge.Services.GetRequiredService<EdgeSettingsFile>().Path), Password);
+        var tester = edge.Services.GetRequiredService<PlcConnectionTester>();
+        var context = new Microsoft.AspNetCore.Http.DefaultHttpContext();
+        context.Request.ContentType = "application/json";
+        context.Request.Body = new MemoryStream(Encoding.UTF8.GetBytes(Body(S7(plcPort), Password)));
+        context.Response.Body = new MemoryStream();
+
+        await tester.TestAsync(context, _port);
+
+        // Nothing listens on plcPort: a second driver would answer "unreachable".
+        context.Response.Body.Position = 0;
+        Assert.Equal("ok", JsonDocument.Parse(context.Response.Body).RootElement.GetProperty("result").GetString());
+        Assert.Equal(1, driver.ReachabilityChecks);
+    }
+
+    [Fact]
+    public async Task ANamedDevice_IsTestedThroughItsOwnRunningDriverOnly()
+    {
+        var a = new ReachabilityDriver();
+        var b = new ReachabilityDriver();
+        await using var edge = EdgeTestHost.Create(
+            EdgeTestHost.MultiDevice(new Dictionary<string, string?>
+            {
+                ["Edge:Channels:0:Name"] = "S7",
+                ["Edge:Channels:0:Driver"] = "S7",
+                ["Edge:Channels:0:Devices:0:Name"] = "A",
+                ["Edge:Channels:0:Devices:0:Model"] = "S7-1200",
+                ["Edge:Channels:0:Devices:0:Host"] = "127.0.0.1",
+                ["Edge:Channels:0:Devices:1:Name"] = "B",
+                ["Edge:Channels:0:Devices:1:Model"] = "S7-1200",
+                ["Edge:Channels:0:Devices:1:Host"] = "127.0.0.2",
+            }),
+            services => services.AddSingleton<IndustrialIot.Edge.Drivers.IPlcDriverFactory>(
+                new FakeDriverFactory(device => device.Name == "A" ? a : b)));
+        SettingsPassword.Store(SettingsPassword.PathFor(edge.Services.GetRequiredService<EdgeSettingsFile>().Path), Password);
+        var tester = edge.Services.GetRequiredService<PlcConnectionTester>();
+
+        var (status, result) = await TestDirectAsync(tester, new JsonObject { ["password"] = Password, ["device"] = "b" });
+        var (unknownStatus, unknown) = await TestDirectAsync(tester, new JsonObject { ["password"] = Password, ["device"] = "C" });
+
+        Assert.Equal((int)HttpStatusCode.OK, status);
+        Assert.Equal("ok", result.GetProperty("result").GetString());
+        Assert.Equal((0, 1), (a.ReachabilityChecks, b.ReachabilityChecks));
+        Assert.Equal((int)HttpStatusCode.BadRequest, unknownStatus);
+        Assert.Contains("device", unknown.GetRawText(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ADisabledFx3u_IsTestedWithATemporaryMc1eDriver()
+    {
+        await using var adapter = new FakeMc1eServer();
+        await using var edge = EdgeTestHost.Create(
+            EdgeTestHost.MultiDevice(new Dictionary<string, string?>
+            {
+                ["Edge:Channels:0:Name"] = "Fx3",
+                ["Edge:Channels:0:Driver"] = "Mc1E",
+                ["Edge:Channels:0:Devices:0:Name"] = "Old",
+                ["Edge:Channels:0:Devices:0:Model"] = "FX3U",
+                ["Edge:Channels:0:Devices:0:Host"] = "127.0.0.1",
+                ["Edge:Channels:0:Devices:0:Port"] = adapter.Port.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                ["Edge:Channels:0:Devices:0:Enabled"] = "false",
+            }));
+        SettingsPassword.Store(SettingsPassword.PathFor(edge.Services.GetRequiredService<EdgeSettingsFile>().Path), Password);
+        var tester = edge.Services.GetRequiredService<PlcConnectionTester>();
+
+        var (status, result) = await TestDirectAsync(tester, new JsonObject { ["password"] = Password, ["device"] = "Old" });
+
+        Assert.Equal((int)HttpStatusCode.OK, status);
+        Assert.Equal("ok", result.GetProperty("result").GetString());
+        Assert.Equal(1, adapter.Connections);
+        Assert.Empty(adapter.Frames); // a reachability test connects and sends nothing
+    }
+
+    [Fact]
     public async Task InvalidPlc_Is400_WithKeyPaths()
     {
         await StartAsync();
@@ -215,6 +334,41 @@ public sealed class PlcConnectionTesterTests : IAsyncDisposable
         });
         _outer = builder.Build();
         await _outer.StartAsync();
+    }
+
+    private async Task<(int Status, JsonElement Body)> TestDirectAsync(PlcConnectionTester tester, JsonObject body)
+    {
+        var context = new Microsoft.AspNetCore.Http.DefaultHttpContext();
+        context.Request.ContentType = "application/json";
+        context.Request.Body = new MemoryStream(Encoding.UTF8.GetBytes(body.ToJsonString()));
+        context.Response.Body = new MemoryStream();
+
+        await tester.TestAsync(context, _port);
+
+        context.Response.Body.Position = 0;
+        return (context.Response.StatusCode, JsonDocument.Parse(context.Response.Body).RootElement.Clone());
+    }
+
+    /// <summary>Answers reachable and counts how often it was asked.</summary>
+    private sealed class ReachabilityDriver : IndustrialIot.Edge.Drivers.IPlcDriver
+    {
+        private int _checks;
+
+        public int ReachabilityChecks => Volatile.Read(ref _checks);
+
+        public Task<IReadOnlyList<IndustrialIot.Edge.Drivers.PlcReadResult>> ReadAsync(
+            IReadOnlyList<IndustrialIot.Edge.Drivers.ResolvedTag> tags, CancellationToken ct) =>
+            Task.FromResult<IReadOnlyList<IndustrialIot.Edge.Drivers.PlcReadResult>>([]);
+
+        public Task WriteAsync(
+            IndustrialIot.Edge.Drivers.Models.IPlcAddress address, IndustrialIot.Edge.Drivers.PlcDataType type, object value, CancellationToken ct) =>
+            Task.CompletedTask;
+
+        public Task<bool> IsReachableAsync(CancellationToken ct)
+        {
+            Interlocked.Increment(ref _checks);
+            return Task.FromResult(true);
+        }
     }
 
     private static JsonObject S7(int port, int timeoutMs = 1000, string host = "127.0.0.1") =>

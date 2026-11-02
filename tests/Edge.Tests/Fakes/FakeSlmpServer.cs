@@ -25,8 +25,9 @@ public enum FakeSlmpMode
 
 /// <summary>
 /// Loopback stand-in for an FX5U SLMP port (3E frame, binary). Requests are parsed as the PLC would; every
-/// frame is recorded, and any frame that is not a Device Read (0401/0000) on one of the four device codes is
-/// recorded as unexpected.
+/// frame is recorded, and any frame that is not a Device Read (0401/0000) on one of the four device codes, or a
+/// Device Write (1401) of D in word units or of M/X/Y in bit units, is recorded as unexpected. Writes change
+/// <see cref="Memory"/> and <see cref="BitWords"/>.
 /// </summary>
 internal sealed class FakeSlmpServer : IAsyncDisposable
 {
@@ -36,6 +37,8 @@ internal sealed class FakeSlmpServer : IAsyncDisposable
     private readonly CancellationTokenSource _stop = new();
     private readonly ConcurrentQueue<byte[]> _frames = new();
     private readonly ConcurrentQueue<byte[]> _unexpected = new();
+    private readonly List<(byte Code, int Head, int Points)> _writes = [];
+    private int _dropNextWrite;
     private readonly List<TcpClient> _clients = [];
     private readonly Task _acceptLoop;
     private int _connections;
@@ -84,7 +87,25 @@ internal sealed class FakeSlmpServer : IAsyncDisposable
 
     public IReadOnlyList<byte[]> UnexpectedFrames => [.. _unexpected];
 
+    /// <summary>The command of every frame received (bytes 11-12).</summary>
+    public IReadOnlyList<ushort> Commands => [.. _frames.Where(f => f.Length >= 13).Select(f => BinaryPrimitives.ReadUInt16LittleEndian(f.AsSpan(11)))];
+
+    /// <summary>Well-formed Device Writes applied, as (device code, head, points).</summary>
+    public IReadOnlyList<(byte Code, int Head, int Points)> Writes
+    {
+        get
+        {
+            lock (_writes)
+            {
+                return [.. _writes];
+            }
+        }
+    }
+
     public int Connections => Volatile.Read(ref _connections);
+
+    /// <summary>The next Device Write is received and the connection is closed without a reply.</summary>
+    public void DropNextWrite() => Volatile.Write(ref _dropNextWrite, 1);
 
     /// <summary>The next request is answered with this end code plus 9 bytes of error information.</summary>
     public void FailNextWith(ushort endCode) => Volatile.Write(ref _pendingErrorEndCode, endCode);
@@ -144,6 +165,24 @@ internal sealed class FakeSlmpServer : IAsyncDisposable
                 var frame = header.Concat(body).ToArray();
                 _frames.Enqueue(frame);
 
+                if (IsDeviceWrite(frame))
+                {
+                    if (Interlocked.Exchange(ref _dropNextWrite, 0) == 1)
+                    {
+                        // The request arrived; the connection breaks before any reply.
+                        client.Dispose();
+                        return;
+                    }
+
+                    if (Mode != FakeSlmpMode.BlackHole)
+                    {
+                        var refusal = (ushort)Interlocked.Exchange(ref _pendingErrorEndCode, 0);
+                        await stream.WriteAsync(refusal == 0 ? ApplyWrite(frame) : BuildReply(frame, refusal), _stop.Token);
+                    }
+
+                    continue;
+                }
+
                 // Anything but a 21-byte Device Read on a known device code is recorded, never answered as a read.
                 if (frame.Length != 21
                     || frame[0] != 0x50
@@ -187,12 +226,60 @@ internal sealed class FakeSlmpServer : IAsyncDisposable
         }
     }
 
-    private byte[] BuildReply(byte[] frame)
+    /// <summary>A Device Write with the read header: D in word units (2 bytes per point) or M/X/Y in bit units (a nibble each).</summary>
+    private static bool IsDeviceWrite(byte[] frame)
+    {
+        if (frame.Length < 22
+            || frame[0] != 0x50
+            || frame[1] != 0x00
+            || !frame.AsSpan(2, 5).SequenceEqual(new byte[] { 0x00, 0xFF, 0xFF, 0x03, 0x00 })
+            || BinaryPrimitives.ReadUInt16LittleEndian(frame.AsSpan(7)) != frame.Length - 9
+            || BinaryPrimitives.ReadUInt16LittleEndian(frame.AsSpan(11)) != 0x1401
+            || !DeviceCodes.Contains(frame[18]))
+        {
+            return false;
+        }
+
+        var subcommand = BinaryPrimitives.ReadUInt16LittleEndian(frame.AsSpan(13));
+        var points = BinaryPrimitives.ReadUInt16LittleEndian(frame.AsSpan(19));
+        var data = frame.Length - 21;
+        return frame[18] == 0xA8
+            ? subcommand == 0x0000 && points >= 1 && data == 2 * points
+            : subcommand == 0x0001 && points >= 1 && data == (points + 1) / 2;
+    }
+
+    private byte[] ApplyWrite(byte[] frame)
+    {
+        var head = frame[15] | (frame[16] << 8) | (frame[17] << 16);
+        var points = BinaryPrimitives.ReadUInt16LittleEndian(frame.AsSpan(19));
+        for (var i = 0; i < points; i++)
+        {
+            if (frame[18] == 0xA8)
+            {
+                Memory[head + i] = BinaryPrimitives.ReadUInt16LittleEndian(frame.AsSpan(21 + (2 * i)));
+            }
+            else
+            {
+                // Bit units: the first point is the high nibble of each byte.
+                var nibble = i % 2 == 0 ? frame[21 + (i / 2)] >> 4 : frame[21 + (i / 2)] & 0x0F;
+                SetBit(frame[18], head + i, nibble != 0);
+            }
+        }
+
+        lock (_writes)
+        {
+            _writes.Add((frame[18], head, points));
+        }
+
+        return [0xD0, 0x00, 0x00, 0xFF, 0xFF, 0x03, 0x00, 0x02, 0x00, 0x00, 0x00];
+    }
+
+    private byte[] BuildReply(byte[] frame, ushort forcedEndCode = 0)
     {
         var head = frame[15] | (frame[16] << 8) | (frame[17] << 16);
         var points = BinaryPrimitives.ReadUInt16LittleEndian(frame.AsSpan(19));
 
-        var errorEndCode = (ushort)Interlocked.Exchange(ref _pendingErrorEndCode, 0);
+        var errorEndCode = forcedEndCode != 0 ? forcedEndCode : (ushort)Interlocked.Exchange(ref _pendingErrorEndCode, 0);
         if (errorEndCode == 0 && MaxDevice is { } max && frame[18] == 0xA8 && head + points - 1 > max)
         {
             errorEndCode = RangeEndCode;

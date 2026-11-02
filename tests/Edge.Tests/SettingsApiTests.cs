@@ -96,7 +96,6 @@ public sealed class SettingsApiTests : IAsyncDisposable
         { "unknown-settings-key", HttpStatusCode.BadRequest },
         { "duplicate-tag", HttpStatusCode.BadRequest },
         { "bad-address", HttpStatusCode.BadRequest },
-        { "slmp-with-commands", HttpStatusCode.BadRequest },
         { "stale-revision", HttpStatusCode.Conflict },
         { "writable-true", HttpStatusCode.BadRequest },
         { "writable-address-changed", HttpStatusCode.BadRequest },
@@ -116,7 +115,7 @@ public sealed class SettingsApiTests : IAsyncDisposable
     [MemberData(nameof(Refusals))]
     public async Task Refusal_HasItsStatus_AndLeavesTheFileUnchanged(string refusal, HttpStatusCode expected)
     {
-        await StartAsync(withWritable: true, commandsEnabled: refusal == "slmp-with-commands");
+        await StartAsync(withWritable: true);
         var digest = Digest();
         var revision = await RevisionAsync();
         var keep = WritableTag();
@@ -133,7 +132,6 @@ public sealed class SettingsApiTests : IAsyncDisposable
             "unknown-settings-key" => (Body(revision, Password, WithKey(Proposed(tags: [keep]), "Mqtt", new JsonObject { ["Host"] = "x" })), "application/json", NoHeaders),
             "duplicate-tag" => (Body(revision, Password, Proposed(tags: [keep, Tag("A.Dup", "DB5.DBW0"), Tag("a.dup", "DB5.DBW2")])), "application/json", NoHeaders),
             "bad-address" => (Body(revision, Password, Proposed(tags: [keep, Tag("A.Bad", "D100")])), "application/json", NoHeaders),
-            "slmp-with-commands" => (Body(revision, Password, Proposed(protocol: "Slmp", port: 5000, timeoutMs: 1000, tags: [Tag("F.D100", "D100")])), "application/json", NoHeaders),
             "stale-revision" => (Body("0000", Password, Proposed(tags: [keep])), "application/json", NoHeaders),
             "writable-true" => (Body(revision, Password, Proposed(tags: [keep, Tag("A.New", "DB5.DBW0", writable: true)])), "application/json", NoHeaders),
             "writable-address-changed" => (Body(revision, Password, Proposed(tags: [WritableTag(address: "DB1.DBW10")])), "application/json", NoHeaders),
@@ -189,6 +187,17 @@ public sealed class SettingsApiTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task SlmpWithCommandsEnabled_IsSaved()
+    {
+        await StartAsync(commandsEnabled: true);
+
+        var applyId = await SaveAndWaitAsync(Proposed(protocol: "Slmp", port: 5000, timeoutMs: 1000, tags: [Tag("F.D100", "D100")]));
+
+        Assert.NotEmpty(applyId);
+        Assert.Equal("Slmp", (await GetSettingsAsync()).GetProperty("settings").GetProperty("plc").GetProperty("protocol").GetString());
+    }
+
+    [Fact]
     public async Task BodyOverOneMegabyte_Is413()
     {
         await StartAsync();
@@ -196,6 +205,46 @@ public sealed class SettingsApiTests : IAsyncDisposable
         using var response = await PutAsync(new string(' ', SettingsService.MaxBodyBytes + 10) + "{}");
 
         Assert.Equal(HttpStatusCode.RequestEntityTooLarge, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Save_OnAMultiDeviceFile_IsRefused_AndTheFileIsUnchanged()
+    {
+        // The single-PLC page would write schema 1 back: the device prefix of every TagId and each device's writes
+        // switch would be lost. Called directly, so the refusal is checked without a running host.
+        Directory.CreateDirectory(Path.GetDirectoryName(SettingsPath())!);
+        File.WriteAllText(SettingsPath(), """
+            {"SchemaVersion":2,"Edge":{"Channels":[{"Name":"S7","Driver":"S7","Devices":[
+              {"Name":"Line1","Model":"S7-1200","Host":"10.0.0.1","Tags":[{"Name":"Temp","Address":"DB1.DBD0","DataType":"Real"}]}]}]}}
+            """);
+        var digest = Digest();
+        var file = EdgeSettingsFile.Read(SettingsPath());
+        var service = new SettingsService(
+            new ConfigurationBuilder().Build(),
+            file,
+            Microsoft.Extensions.Options.Options.Create(new Drivers.PlcTagCatalogOptions()),
+            new Drivers.PlcDeviceRegistry(
+                new Configuration.EdgeDeviceSet([], MigratedFromV1: false),
+                new FakeDriverFactory(_ => new FakePlcDriver()),
+                new ServiceCollection().BuildServiceProvider(),
+                Microsoft.Extensions.Logging.Abstractions.NullLogger<Drivers.PlcDeviceRegistry>.Instance),
+            Microsoft.Extensions.Options.Options.Create(new Drivers.PlcProtocolOptions()),
+            new ServiceCollection().BuildServiceProvider(),
+            Microsoft.Extensions.Options.Options.Create(new Polling.PollOptions()),
+            new SettingsPassword(TimeProvider.System, Microsoft.Extensions.Logging.Abstractions.NullLogger<SettingsPassword>.Instance));
+        var context = new Microsoft.AspNetCore.Http.DefaultHttpContext();
+        context.Request.ContentType = "application/json";
+        context.Request.Body = new MemoryStream(Encoding.UTF8.GetBytes(Body(file.Revision, Password, Proposed(tags: [Tag("New.One", "DB5.DBW0")]))));
+        context.Response.Body = new MemoryStream();
+
+        await service.SaveAsync(context, _port);
+
+        Assert.Equal((int)HttpStatusCode.Conflict, context.Response.StatusCode);
+        context.Response.Body.Position = 0;
+        var reply = JsonDocument.Parse(context.Response.Body).RootElement;
+        Assert.Equal("multi-device-file", reply.GetProperty("error").GetString());
+        Assert.Contains("multi-device configuration", reply.GetProperty("message").GetString());
+        Assert.Equal(digest, Digest());
     }
 
     [Fact]

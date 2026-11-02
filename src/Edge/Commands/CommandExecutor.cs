@@ -21,8 +21,7 @@ internal sealed record CommandDisposition(string? CommandId, string? ResultJson,
 /// processed is answered with its original result, never executed again.
 /// </summary>
 internal sealed class CommandExecutor(
-    IPlcDriver driver,
-    PlcTagCatalog catalog,
+    PlcDeviceRegistry registry,
     CommandLog log,
     EdgeDatabase database,
     IOptions<EdgeOptions> edge,
@@ -154,8 +153,9 @@ internal sealed class CommandExecutor(
                 return await StoredAsync(command, expiresMs, CommandOutcome.Rejected, CommandReasons.ClockSkew, ct).ConfigureAwait(false);
         }
 
-        // 10. The tag catalog decides writability, bounds and value type.
-        var decision = catalog.EvaluateWrite(command.TagId, command.TargetValue!.Value);
+        // 10. The device that owns the tag must be enabled and allow writes (the global switch already let the
+        // command in); then its tag catalog decides writability, bounds and value type.
+        var (device, decision) = Evaluate(command);
         if (!decision.Allowed)
         {
             return await StoredAsync(command, expiresMs, CommandOutcome.Rejected, decision.Reason, ct).ConfigureAwait(false);
@@ -180,7 +180,7 @@ internal sealed class CommandExecutor(
 
         // 13. The write. From here on cancellation is ignored: the driver's own timeout bounds it, and a
         // write that may have reached the PLC must end as a known outcome, not as "cancelled".
-        var (outcome, reason) = await WriteAsync(decision, CancellationToken.None).ConfigureAwait(false);
+        var (outcome, reason) = await WriteAsync(device!.Driver!, decision, CancellationToken.None).ConfigureAwait(false);
         var resultJson = Result(command, outcome, reason);
         Log(command, outcome, reason);
 
@@ -195,7 +195,28 @@ internal sealed class CommandExecutor(
         return new CommandDisposition(id, resultJson, Stored: false, Acknowledge: false);
     }
 
-    private async Task<(CommandOutcome Outcome, string? Reason)> WriteAsync(WriteDecision decision, CancellationToken ct)
+    /// <summary>The owning device and the write decision; a refused device has no catalog check and no driver call.</summary>
+    private (DeviceRuntime? Device, WriteDecision Decision) Evaluate(DeviceCommand command)
+    {
+        if (!registry.TryGetDevice(command.TagId, out var device))
+        {
+            return (null, WriteDecision.Deny(CommandReasons.UnknownTag));
+        }
+
+        if (device.Driver is null)
+        {
+            return (device, WriteDecision.Deny(CommandReasons.DeviceDisabled));
+        }
+
+        if (!device.Device.WritesEnabled)
+        {
+            return (device, WriteDecision.Deny(CommandReasons.DeviceWritesDisabled));
+        }
+
+        return (device, device.Catalog.EvaluateWrite(command.TagId, command.TargetValue!.Value));
+    }
+
+    private async Task<(CommandOutcome Outcome, string? Reason)> WriteAsync(IPlcDriver driver, WriteDecision decision, CancellationToken ct)
     {
         var tag = decision.ResolvedTag!;
         try

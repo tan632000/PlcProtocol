@@ -61,6 +61,43 @@ public class TelemetryIngestionTests(PostgresFixture database)
     }
 
     [Fact]
+    public async Task StringValue_IsStored_AndReadBackUnchanged()
+    {
+        await using var ctx = await StartAsync(database);
+        var now = DateTimeOffset.UtcNow;
+
+        var text = Sample("edge-a", 1, "t1", 1, now).Replace("\"value\":1", "\"value\":\"AB\"", StringComparison.Ordinal);
+        Assert.Contains("\"value\":\"AB\"", text, StringComparison.Ordinal);
+        await ctx.PublishAsync("edge-a", text);
+        await ctx.PublishAsync("edge-a", Sample("edge-a", 2, "marker", 0, now));
+        await WaitUntilAsync(async () => await ctx.CountTelemetryAsync() == 2, "both stored without blocking the queue");
+
+        Assert.Equal("\"AB\"", await ctx.QueryAsync(db => db.Telemetry.Where(t => t.Sequence == 1).Select(t => t.Value).SingleAsync()));
+        using var request = new HttpRequestMessage(HttpMethod.Get, "/api/v1/edges/edge-a/tags/latest");
+        request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", ctx.Host.CreateToken(["Viewer"]));
+        using var response = await ctx.Client.SendAsync(request);
+        using var latest = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        var row = latest.RootElement.EnumerateArray().Single(r => r.GetProperty("tagId").GetString() == "t1");
+        Assert.Equal("AB", row.GetProperty("value").GetString());
+    }
+
+    [Fact]
+    public async Task StringValueWithNul_IsRefused_WithoutStallingTheQueue()
+    {
+        await using var ctx = await StartAsync(database);
+        var now = DateTimeOffset.UtcNow;
+
+        // A hand-made sample: the Edge never publishes it, and jsonb could not store it.
+        var text = Sample("edge-a", 1, "t1", 1, now).Replace("\"value\":1", "\"value\":\"A\\u0000B\"", StringComparison.Ordinal);
+        Assert.Contains("\\u0000", text, StringComparison.Ordinal);
+        await ctx.PublishAsync("edge-a", text);
+        await ctx.PublishAsync("edge-a", Sample("edge-a", 2, "marker", 0, now));
+        await WaitUntilAsync(async () => await ctx.CountTelemetryAsync() == 1, "the marker after the refused sample");
+
+        Assert.Equal([2L], await ctx.QueryAsync(db => db.Telemetry.Select(t => t.Sequence).ToListAsync()));
+    }
+
+    [Fact]
     public async Task LatestValue_OnlyNewer()
     {
         await using var ctx = await StartAsync(database);

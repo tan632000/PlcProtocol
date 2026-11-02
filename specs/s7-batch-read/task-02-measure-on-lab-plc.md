@@ -1,7 +1,7 @@
 # Task 02 — The Monitor shows the read duration; the gain is measured on the lab S7-1200
 
 Status: blocked
-Blocker: Step 1 is committed (a7d4c01); the live baseline/after runs need the lab S7-1200, and no PLC is available to the user right now (2026-10-28). Baseline worktree ../PlcProtocol-baseline is built and kept for that run.
+Blocker: superseded by specs/multi-device-core/task-10-docs-and-live-check.md (2026-11-02): the S7-1200 readMs measurement is done there (median over >= 30 cycles with 100 tags); this task stays blocked and is not run separately. The baseline worktree ../PlcProtocol-baseline is still on disk; remove it once task-10 has its measurement.
 
 ## Outcome
 The Monitor status carries the last cycle's batch-read duration (`readMs`); on the lab S7-1200 with the 21 configured

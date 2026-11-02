@@ -22,4 +22,7 @@ public sealed record PlcTagDefinition
 
     /// <summary>Optional inclusive upper bound for writes; numeric types only.</summary>
     public decimal? Max { get; init; }
+
+    /// <summary>Characters of a <see cref="PlcDataType.String"/> tag; required for String and only for String.</summary>
+    public int? Length { get; init; }
 }

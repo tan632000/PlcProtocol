@@ -23,7 +23,7 @@ public sealed class PlcProtocolSwitchTests
         await using var edge = EdgeTestHost.Create(Plc(protocol: null));
         await edge.Host.StartAsync();
 
-        var driver = Assert.IsType<SiemensS7Driver>(edge.Services.GetRequiredService<IPlcDriver>());
+        var driver = Assert.IsType<SiemensS7Driver>(edge.Services.GetRequiredService<PlcDeviceRegistry>().Devices[0].Driver!);
         Assert.Equal(S7Net.CpuType.S71200, driver.CreatePlc().CPU);
         await edge.Host.StopAsync();
     }
@@ -34,7 +34,7 @@ public sealed class PlcProtocolSwitchTests
         await using var edge = EdgeTestHost.Create(Plc("s7", "S71500"));
         await edge.Host.StartAsync();
 
-        var driver = Assert.IsType<SiemensS7Driver>(edge.Services.GetRequiredService<IPlcDriver>());
+        var driver = Assert.IsType<SiemensS7Driver>(edge.Services.GetRequiredService<PlcDeviceRegistry>().Devices[0].Driver!);
         Assert.Equal(S7Net.CpuType.S71500, driver.CreatePlc().CPU);
         await edge.Host.StopAsync();
     }
@@ -71,19 +71,27 @@ public sealed class PlcProtocolSwitchTests
 
         await edge.Host.StartAsync();
 
-        Assert.IsType<IndustrialIot.Edge.Drivers.Slmp.MitsubishiSlmpDriver>(edge.Services.GetRequiredService<IPlcDriver>());
+        Assert.IsType<IndustrialIot.Edge.Drivers.Slmp.MitsubishiSlmpDriver>(edge.Services.GetRequiredService<PlcDeviceRegistry>().Devices[0].Driver!);
         await edge.Host.StopAsync();
         Assert.Empty(server.UnexpectedFrames);
     }
 
     [Fact]
-    public async Task SlmpWithCommandsEnabled_FailsRealStartNamingBothKeys()
+    public void SlmpWithCommandsEnabled_IsAcceptedByTheProtocolSwitch()
     {
-        var ex = await Assert.ThrowsAnyAsync<Exception>(() => StartRealHostAsync(Plc("Slmp", commands: "true")));
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Edge:Plc:Protocol"] = "Slmp",
+                ["Edge:Plc:Host"] = "127.0.0.1",
+                ["Edge:Commands:Enabled"] = "true",
+            })
+            .Build();
 
-        Assert.Contains("Edge:Commands:Enabled", ex.Message);
-        Assert.Contains("Edge:Plc:Protocol", ex.Message);
-        Assert.DoesNotContain("Unable to resolve", ex.Message);
+        var services = new ServiceCollection();
+        services.AddPlcProtocol(configuration);
+
+        Assert.Equal(1, services.Count(d => d.ServiceType == typeof(IPlcDriver)));
     }
 
     [Fact]

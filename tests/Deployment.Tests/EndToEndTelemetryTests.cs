@@ -8,6 +8,7 @@ using DotNet.Testcontainers.Configurations;
 using DotNet.Testcontainers.Containers;
 using IndustrialIot.Edge;
 using IndustrialIot.Edge.Buffering;
+using IndustrialIot.Edge.Configuration;
 using IndustrialIot.Edge.Drivers;
 using IndustrialIot.Edge.Drivers.Models;
 using Microsoft.AspNetCore.Hosting;
@@ -231,7 +232,7 @@ public sealed class EndToEndTelemetryTests(ITestOutputHelper output)
             var builder = Host.CreateEmptyApplicationBuilder(new HostApplicationBuilderSettings { ContentRootPath = _edgeRoot });
             builder.Configuration.AddInMemoryCollection(settings);
             builder.Services.AddEdgeAgent(builder.Configuration);
-            builder.Services.AddSingleton<IPlcDriver, SimulatedPlc>();
+            builder.Services.AddSingleton<IPlcDriverFactory>(new SimulatedPlcFactory());
             _edge = builder.Build();
             await _edge.StartAsync();
         }
@@ -287,6 +288,12 @@ public sealed class EndToEndTelemetryTests(ITestOutputHelper output)
                 builder.UseSetting(key, value);
             }
         }
+    }
+
+    /// <summary>Gives every device of the Edge a simulated PLC.</summary>
+    private sealed class SimulatedPlcFactory : IPlcDriverFactory
+    {
+        public IPlcDriver Create(ResolvedDevice device) => new SimulatedPlc();
     }
 
     /// <summary>A PLC whose every tag reads a changing Int.</summary>

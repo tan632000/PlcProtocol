@@ -20,8 +20,169 @@ public sealed class SlmpDriverTests : IAsyncLifetime
     public async Task DisposeAsync()
     {
         var unexpected = _server.UnexpectedFrames;
+        var commands = _server.Commands;
         await _server.DisposeAsync();
         Assert.Empty(unexpected);
+        Assert.All(commands, command => Assert.Contains(command, new ushort[] { 0x0401, 0x1401 }));
+    }
+
+    [Fact]
+    public async Task StringAndLReal_AreReadFromDRegisters()
+    {
+        _server.Memory[100] = 0x4241; // "AB"
+        _server.Memory[101] = 0x0043; // "C" and a NUL
+        var bits = BitConverter.DoubleToInt64Bits(1.5e300);
+        for (var w = 0; w < 4; w++)
+        {
+            _server.Memory[200 + w] = (ushort)(bits >> (16 * w)); // low word first
+        }
+
+        await using var driver = CreateDriver(timeoutMs: 3000);
+
+        var results = await driver.ReadAsync(
+        [
+            new ResolvedTag("Recipe", Syntax.Parse("D100", PlcDataType.String, 4), PlcDataType.String, false, null, null, Length: 4),
+            Tag("Ratio", "D200", PlcDataType.LReal),
+        ], CancellationToken.None);
+
+        Assert.All(results, r => Assert.Null(r.Error));
+        Assert.Equal(["ABC", 1.5e300], results.Select(r => r.Value));
+    }
+
+    [Theory]
+    [InlineData("D100", PlcDataType.String, 254, true)]
+    [InlineData("D100", PlcDataType.String, 255, false)]
+    [InlineData("D7998", PlcDataType.String, 6, false)] // three registers run past D7999
+    [InlineData("M100", PlcDataType.String, 2, false)]
+    [InlineData("D7996", PlcDataType.LReal, null, true)]
+    [InlineData("D7997", PlcDataType.LReal, null, false)]
+    [InlineData("D100", PlcDataType.DTL, null, false)]
+    public void NewTypes_FitTheDRegisters(string address, PlcDataType type, int? length, bool accepted)
+    {
+        if (accepted)
+        {
+            Assert.Equal(address, Syntax.Parse(address, type, length).Canonical);
+        }
+        else
+        {
+            Assert.ThrowsAny<PlcException>(() => Syntax.Parse(address, type, length));
+        }
+    }
+
+    [Fact]
+    public async Task DeviceWriteFrames_AreExact()
+    {
+        await using var driver = CreateDriver(timeoutMs: 3000);
+
+        // [UNVERIFIED until checked against SH-081951 and a real FX5U] the read header with command 01 14, subcommand
+        // 00 00 (words) or 01 00 (bits), head, device code, points and data.
+        Assert.Equal(
+            [0x50, 0x00, 0x00, 0xFF, 0xFF, 0x03, 0x00, 0x0E, 0x00, 0x0A, 0x00, 0x01, 0x14, 0x00, 0x00, 0x64, 0x00, 0x00, 0xA8, 0x01, 0x00, 0xD2, 0x04],
+            driver.BuildDeviceWrite(SlmpDevice.D, 100, 0x0000, 1, [0xD2, 0x04]));
+        Assert.Equal(
+            [0x50, 0x00, 0x00, 0xFF, 0xFF, 0x03, 0x00, 0x0D, 0x00, 0x0A, 0x00, 0x01, 0x14, 0x01, 0x00, 0x05, 0x00, 0x00, 0x90, 0x01, 0x00, 0x10],
+            driver.BuildDeviceWrite(SlmpDevice.M, 5, 0x0001, 1, [0x10]));
+    }
+
+    [Fact]
+    public async Task WrittenValues_ReadBack()
+    {
+        await using var driver = CreateDriver();
+
+        await driver.WriteAsync(Syntax.Parse("D100", PlcDataType.Int), PlcDataType.Int, (short)1234, CancellationToken.None);
+        await driver.WriteAsync(Syntax.Parse("D102", PlcDataType.DInt), PlcDataType.DInt, 123456, CancellationToken.None);
+        await driver.WriteAsync(Syntax.Parse("D110", PlcDataType.LReal), PlcDataType.LReal, 1.5e300, CancellationToken.None);
+        await driver.WriteAsync(Syntax.Parse("D120", PlcDataType.String, 5), PlcDataType.String, "AB\0\0\0", CancellationToken.None);
+        await driver.WriteAsync(Syntax.Parse("M5", PlcDataType.Bool), PlcDataType.Bool, true, CancellationToken.None);
+        await driver.WriteAsync(Syntax.Parse("Y7", PlcDataType.Bool), PlcDataType.Bool, true, CancellationToken.None);
+
+        var results = await driver.ReadAsync(
+        [
+            Tag("a", "D100", PlcDataType.Int),
+            Tag("b", "D102", PlcDataType.DInt),
+            Tag("c", "D110", PlcDataType.LReal),
+            new ResolvedTag("d", Syntax.Parse("D120", PlcDataType.String, 5), PlcDataType.String, false, null, null, Length: 5),
+            Tag("e", "M5", PlcDataType.Bool),
+            Tag("f", "Y7", PlcDataType.Bool),
+            Tag("g", "M4", PlcDataType.Bool),
+        ], CancellationToken.None);
+
+        Assert.All(results, r => Assert.Null(r.Error));
+        Assert.Equal([(short)1234, 123456, 1.5e300, "AB", true, true, false], results.Select(r => r.Value));
+        Assert.Equal(0, _server.Memory[122]); // the padding cleared the String's last register
+        Assert.Equal(
+            [(0xA8, 100, 1), (0xA8, 102, 2), (0xA8, 110, 4), (0xA8, 120, 3), (0x90, 5, 1), (0x9D, 7, 1)],
+            _server.Writes.Select(w => ((int)w.Code, w.Head, w.Points)));
+    }
+
+    [Fact]
+    public async Task AWriteWhoseReplyNeverComes_HasAnUnknownOutcome()
+    {
+        _server.DropNextWrite();
+        await using var driver = CreateDriver();
+
+        var error = await Record.ExceptionAsync(
+            () => driver.WriteAsync(Syntax.Parse("D100", PlcDataType.Int), PlcDataType.Int, (short)1, CancellationToken.None));
+
+        Assert.IsType<PlcWriteOutcomeUnknownException>(error);
+    }
+
+    [Fact]
+    public async Task AWriteTheFx5uRefuses_IsAccessDenied_AndTheConnectionStaysInStep()
+    {
+        _server.FailNextWith(0xC051);
+        _server.Memory[0] = 7;
+        await using var driver = CreateDriver();
+
+        var error = await Record.ExceptionAsync(
+            () => driver.WriteAsync(Syntax.Parse("D100", PlcDataType.Int), PlcDataType.Int, (short)1, CancellationToken.None));
+        var read = await driver.ReadAsync([Tag("a", "D0", PlcDataType.Int)], CancellationToken.None);
+
+        Assert.Contains("0xC051", Assert.IsType<PlcAccessDeniedException>(error).Message, StringComparison.Ordinal);
+        Assert.Equal((short)7, read[0].Value);
+        Assert.Equal(1, _server.Connections);
+        Assert.False(_server.Memory.ContainsKey(100));
+    }
+
+    [Fact]
+    public async Task AWrongValueForTheAddress_IsRefusedBeforeAnyIo()
+    {
+        await using var driver = CreateDriver();
+
+        await Assert.ThrowsAsync<PlcValueException>(() => driver.WriteAsync(Syntax.Parse("M5", PlcDataType.Bool), PlcDataType.Int, (short)1, CancellationToken.None));
+        await Assert.ThrowsAsync<PlcValueException>(() => driver.WriteAsync(Syntax.Parse("D7999", PlcDataType.Int), PlcDataType.DInt, 1, CancellationToken.None));
+
+        Assert.Empty(_server.Frames);
+    }
+
+    [Fact]
+    public async Task AWriteDuringAReadCycle_WaitsAndBothComplete()
+    {
+        _server.Mode = FakeSlmpMode.RespondByteByByte; // slow replies keep the read busy
+        _server.Memory[0] = 7;
+        await using var driver = CreateDriver(timeoutMs: 5000);
+        var tags = Enumerable.Range(0, 10).Select(i => Tag($"t{i}", $"D{i * 10}", PlcDataType.Int)).ToArray();
+
+        var read = driver.ReadAsync(tags, CancellationToken.None);
+        var write = driver.WriteAsync(Syntax.Parse("D500", PlcDataType.Int), PlcDataType.Int, (short)42, CancellationToken.None);
+        var results = await read;
+        await write;
+
+        Assert.All(results, r => Assert.Null(r.Error));
+        Assert.Equal((short)7, results[0].Value);
+        Assert.Equal(42, _server.Memory[500]);
+    }
+
+    [Fact]
+    public void TheCommandCodes_AreExactlyDeviceReadAndDeviceWrite()
+    {
+        var codes = typeof(SlmpCommands)
+            .GetFields(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)
+            .Where(f => f.IsLiteral)
+            .Select(f => (ushort)f.GetRawConstantValue()!)
+            .Order();
+
+        Assert.Equal(new ushort[] { 0x0401, 0x1401 }, codes);
     }
 
     [Fact]
@@ -194,7 +355,7 @@ public sealed class SlmpDriverTests : IAsyncLifetime
 
         Assert.Equal(number, parsed.Number);
         Assert.True(parsed.IsBit);
-        Assert.Equal("SLMP is read-only", parsed.ReadOnlyReason);
+        Assert.Equal(address.StartsWith('X') ? SlmpAddress.InputReadOnlyText : null, parsed.ReadOnlyReason);
     }
 
     [Theory]
@@ -412,14 +573,14 @@ public sealed class SlmpDriverTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task Write_IsDeniedBeforeAnyIo()
+    public async Task XWrite_IsDeniedBeforeAnyIo()
     {
         await using var driver = CreateDriver();
 
         var ex = await Assert.ThrowsAsync<PlcAccessDeniedException>(
-            () => driver.WriteAsync(new SlmpAddress(SlmpDevice.D, 0), PlcDataType.Int, (short)1, CancellationToken.None));
+            () => driver.WriteAsync(new SlmpAddress(SlmpDevice.X, 0), PlcDataType.Bool, true, CancellationToken.None));
 
-        Assert.Contains("SLMP is read-only", ex.Message);
+        Assert.Contains(SlmpAddress.InputReadOnlyText, ex.Message);
         Assert.Equal(0, _server.Connections);
         Assert.Empty(_server.Frames);
     }
@@ -434,16 +595,16 @@ public sealed class SlmpDriverTests : IAsyncLifetime
     }
 
     [Fact]
-    public void WritableTag_IsRejectedByTheCatalogWithTheReadOnlyText()
+    public void WritableXTag_IsRejectedByTheCatalogWithTheReadOnlyText()
     {
         var options = new PlcTagCatalogOptions
         {
-            Tags = [new PlcTagDefinition { TagId = "a", Address = "D0", DataType = PlcDataType.Int, Writable = true }],
+            Tags = [new PlcTagDefinition { TagId = "a", Address = "X0", DataType = PlcDataType.Bool, Writable = true }],
         };
 
         var ex = Assert.Throws<InvalidOperationException>(() => new PlcTagCatalog(options, Syntax));
 
-        Assert.Contains("SLMP is read-only", ex.Message);
+        Assert.Contains(SlmpAddress.InputReadOnlyText, ex.Message);
     }
 
     [Theory]
@@ -474,7 +635,7 @@ public sealed class SlmpDriverTests : IAsyncLifetime
 
         Assert.Equal("D7", address.Canonical);
         Assert.False(address.IsBit);
-        Assert.Equal("SLMP is read-only", address.ReadOnlyReason);
+        Assert.Null(address.ReadOnlyReason);
         Assert.Equal("D7999", Syntax.Parse("D7999", PlcDataType.Word).Canonical);
     }
 
@@ -508,7 +669,7 @@ public sealed class SlmpDriverTests : IAsyncLifetime
         await using var edge = EdgeTestHost.Create(SlmpSettings(), runAgentServices: true);
 
         await edge.Host.StartAsync();
-        Assert.IsType<MitsubishiSlmpDriver>(edge.Services.GetRequiredService<IPlcDriver>());
+        Assert.IsType<MitsubishiSlmpDriver>(edge.Services.GetRequiredService<PlcDeviceRegistry>().Devices[0].Driver!);
         var deadline = Stopwatch.StartNew();
         while (_server.Frames.Count == 0 && deadline.Elapsed < TimeSpan.FromSeconds(10))
         {
@@ -542,14 +703,16 @@ public sealed class SlmpDriverTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task Host_FailsStartOnAWritableTag()
+    public async Task Host_FailsStartOnAWritableXTag()
     {
         var settings = SlmpSettings();
+        settings["Edge:Tags:0:Address"] = "X0";
+        settings["Edge:Tags:0:DataType"] = "Bool";
         settings["Edge:Tags:0:Writable"] = "true";
 
         var ex = await Assert.ThrowsAnyAsync<Exception>(() => StartAsync(settings));
 
-        Assert.Contains("SLMP is read-only", ex.Message);
+        Assert.Contains(SlmpAddress.InputReadOnlyText, ex.Message);
     }
 
     [Fact]

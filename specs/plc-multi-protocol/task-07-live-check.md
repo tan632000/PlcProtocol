@@ -1,7 +1,7 @@
 # Task 07 — The Edge reads the real S7-1200 and the real FX5U, proven with discriminating values
 
 Status: blocked
-Blocker: waiting for the user's live run with the lab S7-1200 and the FX5U (Step 2); Step 1 is implemented (launch profile, src/Edge/lab/fx5u/appsettings.json, publish exclusion, .gitignore, LabSettingsTests 3/3; publish verified without lab files). Review of Step 1 runs with the live results.
+Blocker: superseded by specs/multi-device-core/task-10-docs-and-live-check.md (2026-11-02): the live run with the lab S7-1200 and the FX5U is done there with the multi-PLC lab file; this task stays blocked and is not run separately.
 
 ## Outcome
 Running the Edge from Visual Studio without a broker, the Monitor shows values that equal TIA Portal for the lab

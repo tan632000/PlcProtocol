@@ -25,6 +25,26 @@
         "Edge__Mqtt__Password": "not-a-secret-no-broker"
       }
     },
+    "Multi-PLC lab (no broker)": {
+      "commandName": "Project",
+      "commandLineArgs": "--contentRoot lab/multi",
+      "environmentVariables": {
+        "DOTNET_ENVIRONMENT": "Development",
+        "Edge__Mqtt__Host": "no-broker.invalid",
+        "Edge__Mqtt__Password": "not-a-secret-no-broker"
+      }
+    },
+    "Multi-PLC lab + local broker": {
+      "commandName": "Project",
+      "commandLineArgs": "--contentRoot lab/multi",
+      "environmentVariables": {
+        "DOTNET_ENVIRONMENT": "Development",
+        "Edge__EdgeId": "line1-edge01",
+        "Edge__Mqtt__Username": "line1-edge01",
+        "Edge__Mqtt__Host": "127.0.0.1",
+        "Edge__Mqtt__Port": "8883"
+      }
+    },
     "IndustrialIot.Edge": {
       "commandName": "Project",
       "environmentVariables": {

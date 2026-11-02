@@ -11,12 +11,12 @@ namespace IndustrialIot.Edge.Drivers.Slmp;
 /// constants and no parameter carries a command. One TCP connection is kept and one request runs at a time,
 /// because each SLMP connection on the PLC serves a single partner and replies carry no request id.
 /// </summary>
-public sealed class MitsubishiSlmpDriver : IPlcDriver, IAsyncDisposable
+public sealed class MitsubishiSlmpDriver : IPlcDriver, IPlcReadStatistics, IAsyncDisposable
 {
     private const int RequestLength = 21;
     private const int ResponseHeaderLength = 9;
-    private const ushort ReadCommand = 0x0401;
     private const ushort WordUnitsSubcommand = 0x0000;
+    private const ushort BitUnitsSubcommand = 0x0001;
 
     // Error replies carry 9 bytes of error information after the end code; anything longer than a full
     // read is not a reply we understand.
@@ -40,6 +40,10 @@ public sealed class MitsubishiSlmpDriver : IPlcDriver, IAsyncDisposable
     // Tags the PLC refused with an address end code; touched only by ReadAsync (one poller cycle at a time).
     private readonly HashSet<string> _badTags = new(StringComparer.Ordinal);
 
+    // Requests sent by the batch read in progress, and by the last completed one.
+    private int _batchRequests;
+    private int _lastBatchRequests = -1;
+
     public MitsubishiSlmpDriver(IOptions<SlmpOptions> options)
     {
         ArgumentNullException.ThrowIfNull(options);
@@ -58,13 +62,15 @@ public sealed class MitsubishiSlmpDriver : IPlcDriver, IAsyncDisposable
         {
             if (tags[i].Address is SlmpAddress address)
             {
-                slots.Add(new SlmpTagSlot(i, tags[i], address, address.IsBit ? 1 : SlmpBlockPlanner.WordCount(tags[i].DataType)));
+                slots.Add(new SlmpTagSlot(i, tags[i], address, address.IsBit ? 1 : SlmpBlockPlanner.WordCount(tags[i].DataType, tags[i].Length)));
             }
             else
             {
                 results[i] = PlcReadResult.Fail(new PlcAccessDeniedException($"Address '{tags[i].Address.Canonical}' is not an SLMP address."));
             }
         }
+
+        Volatile.Write(ref _batchRequests, 0);
 
         // Remembered bad tags are read alone; the rest are merged into blocks again.
         var bad = slots.Where(s => _badTags.Contains(s.Tag.TagId)).ToList();
@@ -91,12 +97,92 @@ public sealed class MitsubishiSlmpDriver : IPlcDriver, IAsyncDisposable
             unavailable = await ReadSlotsAloneAsync([slot], slot.Address.Device, results, ct).ConfigureAwait(false);
         }
 
+        Volatile.Write(ref _lastBatchRequests, Volatile.Read(ref _batchRequests));
         return results;
     }
 
-    /// <summary>Always fails: this driver cannot write.</summary>
-    public Task WriteAsync(IPlcAddress address, PlcDataType type, object value, CancellationToken ct) =>
-        Task.FromException(new PlcAccessDeniedException(SlmpAddress.ReadOnlyText));
+    public int LastBatchRequests => Volatile.Read(ref _lastBatchRequests);
+
+    /// <summary>
+    /// Writes one value with one Device Write: D in word units (the value's words, low word first), M and Y one point
+    /// in bit units. X and anything that does not fit are refused before any I/O. <paramref name="ct"/> is honored only
+    /// until the request is sent; afterwards a failure means the outcome is unknown.
+    /// </summary>
+    public async Task WriteAsync(IPlcAddress address, PlcDataType type, object value, CancellationToken ct)
+    {
+        var request = BuildWrite(address, type, value);
+        var target = (SlmpAddress)address;
+
+        using var budget = new CancellationTokenSource(Timeout);
+        using var operation = CancellationTokenSource.CreateLinkedTokenSource(ct, budget.Token);
+        await AcquireAsync(operation.Token, ct).ConfigureAwait(false);
+        try
+        {
+            var (socket, stream) = await ConnectAsync(operation.Token, ct).ConfigureAwait(false);
+            ushort endCode;
+            try
+            {
+                // Only the budget applies from here on: cancelling a write that may already be on the wire would tell
+                // the caller "nothing happened" when the PLC may have applied the value.
+                await SendAllAsync(socket, request, budget.Token).ConfigureAwait(false);
+                (endCode, _) = await ReadReplyAsync(stream, request, $"writing {target}", budget.Token).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                Discard();
+                throw new PlcWriteOutcomeUnknownException(
+                    $"Writing {target} was not acknowledged; the PLC may or may not have applied it: {ex.Message}", ex);
+            }
+
+            if (endCode != 0)
+            {
+                throw new PlcAccessDeniedException($"SLMP end code 0x{endCode:X4} writing {target}; the value was not applied.");
+            }
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    /// <summary>The Device Write for one tag, or the refusal (thrown before any I/O).</summary>
+    private byte[] BuildWrite(IPlcAddress address, PlcDataType type, object value)
+    {
+        if (address is not SlmpAddress slmp)
+        {
+            throw new PlcAccessDeniedException($"Address '{address?.Canonical}' is not an SLMP address.");
+        }
+
+        if (slmp.ReadOnlyReason is { } reason)
+        {
+            throw new PlcAccessDeniedException(reason);
+        }
+
+        if (slmp.IsBit)
+        {
+            if (type != PlcDataType.Bool || value is not bool on)
+            {
+                throw new PlcValueException($"Address '{slmp}' holds Bool; a {type} value cannot be written there.");
+            }
+
+            // Bit units: four bits per point, the first point in the high nibble.
+            return BuildDeviceWrite(slmp.Device, slmp.Number, BitUnitsSubcommand, points: 1, [on ? (byte)0x10 : (byte)0x00]);
+        }
+
+        var words = PlcValueConverter.ToWords(type, value);
+        if (slmp.Number + words.Length - 1 > SlmpAddressSyntax.MaxD)
+        {
+            throw new PlcValueException($"Writing {words.Length} word(s) at {slmp} runs past D{SlmpAddressSyntax.MaxD}.");
+        }
+
+        var data = new byte[2 * words.Length];
+        for (var i = 0; i < words.Length; i++)
+        {
+            BinaryPrimitives.WriteUInt16LittleEndian(data.AsSpan(2 * i), words[i]);
+        }
+
+        return BuildDeviceWrite(slmp.Device, slmp.Number, WordUnitsSubcommand, words.Length, data);
+    }
 
     /// <summary>Returns <c>false</c> when the PLC is unreachable or the driver is busy; throws only on caller cancellation or disposal.</summary>
     public async Task<bool> IsReachableAsync(CancellationToken ct)
@@ -175,13 +261,54 @@ public sealed class MitsubishiSlmpDriver : IPlcDriver, IAsyncDisposable
         frame[6] = 0x00;
         BinaryPrimitives.WriteUInt16LittleEndian(frame.AsSpan(7), RequestLength - 9);
         BinaryPrimitives.WriteUInt16LittleEndian(frame.AsSpan(9), MonitoringTimer(_options.TimeoutMs));
-        BinaryPrimitives.WriteUInt16LittleEndian(frame.AsSpan(11), ReadCommand);
+        BinaryPrimitives.WriteUInt16LittleEndian(frame.AsSpan(11), SlmpCommands.DeviceRead);
         BinaryPrimitives.WriteUInt16LittleEndian(frame.AsSpan(13), WordUnitsSubcommand);
         frame[15] = (byte)head;
         frame[16] = (byte)(head >> 8);
         frame[17] = (byte)(head >> 16);
         frame[18] = (byte)device;
         BinaryPrimitives.WriteUInt16LittleEndian(frame.AsSpan(19), (ushort)count);
+        return frame;
+    }
+
+    /// <summary>
+    /// SLMP 3E binary "Device Write": the read header with command 01 14, subcommand 00 00 (word units) or 01 00 (bit
+    /// units), head device (3 bytes), device code, number of points, then the data.
+    /// [UNVERIFIED until checked against the iQ-F SLMP manual SH-081951 and a real FX5U.]
+    /// </summary>
+    internal byte[] BuildDeviceWrite(SlmpDevice device, int head, ushort subcommand, int points, byte[] data)
+    {
+        if (!Enum.IsDefined(device))
+        {
+            throw new ArgumentOutOfRangeException(nameof(device));
+        }
+
+        ArgumentOutOfRangeException.ThrowIfNegative(head);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(head, 0xFFFFFF);
+        ArgumentOutOfRangeException.ThrowIfLessThan(points, 1);
+        if (subcommand is not (WordUnitsSubcommand or BitUnitsSubcommand))
+        {
+            throw new ArgumentOutOfRangeException(nameof(subcommand));
+        }
+
+        var frame = new byte[RequestLength + data.Length];
+        frame[0] = 0x50;
+        frame[1] = 0x00;
+        frame[2] = 0x00;
+        frame[3] = 0xFF;
+        frame[4] = 0xFF;
+        frame[5] = 0x03;
+        frame[6] = 0x00;
+        BinaryPrimitives.WriteUInt16LittleEndian(frame.AsSpan(7), (ushort)(RequestLength - 9 + data.Length));
+        BinaryPrimitives.WriteUInt16LittleEndian(frame.AsSpan(9), MonitoringTimer(_options.TimeoutMs));
+        BinaryPrimitives.WriteUInt16LittleEndian(frame.AsSpan(11), SlmpCommands.DeviceWrite);
+        BinaryPrimitives.WriteUInt16LittleEndian(frame.AsSpan(13), subcommand);
+        frame[15] = (byte)head;
+        frame[16] = (byte)(head >> 8);
+        frame[17] = (byte)(head >> 16);
+        frame[18] = (byte)device;
+        BinaryPrimitives.WriteUInt16LittleEndian(frame.AsSpan(19), (ushort)points);
+        data.CopyTo(frame, RequestLength);
         return frame;
     }
 
@@ -284,7 +411,7 @@ public sealed class MitsubishiSlmpDriver : IPlcDriver, IAsyncDisposable
         results[slot.Index] = PlcReadResult.Ok(
             slot.Address.IsBit
                 ? SlmpBlockPlanner.DecodeBit(slot.Address.Number, own[0])
-                : SlmpBlockPlanner.Decode(slot.Tag.DataType, own));
+                : SlmpBlockPlanner.Decode(slot.Tag.DataType, own, slot.Tag.Length));
     }
 
     private static void FailAll(IReadOnlyList<SlmpTagSlot> slots, PlcReadResult[] results, Exception error)
@@ -334,31 +461,9 @@ public sealed class MitsubishiSlmpDriver : IPlcDriver, IAsyncDisposable
             byte[] data;
             try
             {
+                Interlocked.Increment(ref _batchRequests);
                 await SendAllAsync(socket, request, operation.Token).ConfigureAwait(false);
-
-                // TCP may deliver the reply in several pieces: read exactly the header, then exactly the
-                // length it announces, so no byte of this reply is left behind for the next request.
-                var header = new byte[ResponseHeaderLength];
-                await stream.ReadExactlyAsync(header, operation.Token).ConfigureAwait(false);
-                if (header[0] != 0xD0 || header[1] != 0x00)
-                {
-                    throw Protocol($"reply to {description} does not start with subheader D0 00. {BinaryHint}");
-                }
-
-                if (!header.AsSpan(2, 5).SequenceEqual(request.AsSpan(2, 5)))
-                {
-                    throw Protocol($"reply to {description} addresses another station (header bytes 2-6 differ from the request).");
-                }
-
-                var dataLength = BinaryPrimitives.ReadUInt16LittleEndian(header.AsSpan(7));
-                if (dataLength < 2 || dataLength > MaxResponseDataLength)
-                {
-                    throw Protocol($"reply to {description} announces an invalid data length {dataLength}.");
-                }
-
-                data = new byte[dataLength];
-                await stream.ReadExactlyAsync(data, operation.Token).ConfigureAwait(false);
-                endCode = BinaryPrimitives.ReadUInt16LittleEndian(data);
+                (endCode, data) = await ReadReplyAsync(stream, request, description, operation.Token).ConfigureAwait(false);
             }
             catch (PlcUnavailableException)
             {
@@ -390,6 +495,36 @@ public sealed class MitsubishiSlmpDriver : IPlcDriver, IAsyncDisposable
         {
             _lock.Release();
         }
+    }
+
+    /// <summary>
+    /// Reads one reply to <paramref name="request"/>. TCP may deliver it in several pieces: exactly the header, then
+    /// exactly the length it announces, so no byte of this reply is left behind for the next request.
+    /// </summary>
+    private static async Task<(ushort EndCode, byte[] Data)> ReadReplyAsync(
+        NetworkStream stream, byte[] request, string description, CancellationToken ct)
+    {
+        var header = new byte[ResponseHeaderLength];
+        await stream.ReadExactlyAsync(header, ct).ConfigureAwait(false);
+        if (header[0] != 0xD0 || header[1] != 0x00)
+        {
+            throw Protocol($"reply to {description} does not start with subheader D0 00. {BinaryHint}");
+        }
+
+        if (!header.AsSpan(2, 5).SequenceEqual(request.AsSpan(2, 5)))
+        {
+            throw Protocol($"reply to {description} addresses another station (header bytes 2-6 differ from the request).");
+        }
+
+        var dataLength = BinaryPrimitives.ReadUInt16LittleEndian(header.AsSpan(7));
+        if (dataLength < 2 || dataLength > MaxResponseDataLength)
+        {
+            throw Protocol($"reply to {description} announces an invalid data length {dataLength}.");
+        }
+
+        var data = new byte[dataLength];
+        await stream.ReadExactlyAsync(data, ct).ConfigureAwait(false);
+        return (BinaryPrimitives.ReadUInt16LittleEndian(data), data);
     }
 
     private async Task AcquireAsync(CancellationToken operationToken, CancellationToken callerToken)

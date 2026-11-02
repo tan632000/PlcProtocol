@@ -20,6 +20,42 @@ public static class ContractJson
 {
     public const int SchemaVersion = 1;
 
+    /// <summary>The longest text a telemetry or command value may carry, in UTF-16 chars (PLC strings, dates).</summary>
+    public const int MaxStringValueLength = 256;
+
+    /// <summary>
+    /// Why <paramref name="text"/> cannot be a telemetry or command value, or null when it can: at most
+    /// <see cref="MaxStringValueLength"/> chars, no U+0000 (PostgreSQL jsonb cannot store it) and no lone surrogate
+    /// (UTF-8 cannot carry it). The Edge applies the same rule before it publishes.
+    /// </summary>
+    public static string? StringValueProblem(string text)
+    {
+        ArgumentNullException.ThrowIfNull(text);
+        if (text.Length > MaxStringValueLength)
+        {
+            return $"must be at most {MaxStringValueLength} characters";
+        }
+
+        for (var i = 0; i < text.Length; i++)
+        {
+            if (text[i] == '\0')
+            {
+                return "must not contain the character U+0000";
+            }
+
+            if (char.IsHighSurrogate(text[i]) && i + 1 < text.Length && char.IsLowSurrogate(text[i + 1]))
+            {
+                i++;
+            }
+            else if (char.IsSurrogate(text[i]))
+            {
+                return "must be valid UTF-16 text";
+            }
+        }
+
+        return null;
+    }
+
     public static JsonSerializerOptions Options { get; } = CreateOptions();
 
     /// <summary>Validates, then serializes. Producers can never emit an invalid message.</summary>
@@ -227,12 +263,18 @@ internal static partial class ContractRules
         }
     }
 
-    /// <summary>A command/telemetry value: JSON true, false or a finite number.</summary>
+    /// <summary>
+    /// A command/telemetry value: JSON true, false, a finite number, or a string of at most
+    /// <see cref="ContractJson.MaxStringValueLength"/> chars of valid UTF-16 text (an empty string is a value).
+    /// </summary>
     public static void ScalarValue(JsonElement value, string field)
     {
         switch (value.ValueKind)
         {
             case JsonValueKind.True or JsonValueKind.False:
+                return;
+            case JsonValueKind.String:
+                StringValue(value, field);
                 return;
             // 1e400 is valid JSON but parses to Infinity; non-finite values are forbidden by the contract.
             case JsonValueKind.Number when value.TryGetDouble(out var number) && double.IsFinite(number):
@@ -240,7 +282,26 @@ internal static partial class ContractRules
             case JsonValueKind.Number:
                 throw new ContractValidationException(field, "must be a finite number");
             default:
-                throw new ContractValidationException(field, $"must be true, false or a number (got {value.ValueKind})");
+                throw new ContractValidationException(field, $"must be true, false, a number or a string (got {value.ValueKind})");
+        }
+    }
+
+    private static void StringValue(JsonElement value, string field)
+    {
+        string text;
+        try
+        {
+            text = value.GetString()!;
+        }
+        catch (InvalidOperationException)
+        {
+            // An escaped lone surrogate ("\uD800") cannot be read as text.
+            throw new ContractValidationException(field, "must be valid UTF-16 text");
+        }
+
+        if (ContractJson.StringValueProblem(text) is { } problem)
+        {
+            throw new ContractValidationException(field, problem);
         }
     }
 

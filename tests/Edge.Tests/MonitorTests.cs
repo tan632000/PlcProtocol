@@ -5,7 +5,9 @@ using System.Net.Sockets;
 using System.Text.Json;
 using IndustrialIot.Edge.Drivers;
 using IndustrialIot.Edge.Drivers.Models;
+using IndustrialIot.Edge.Monitoring;
 using IndustrialIot.Edge.Tests.Fakes;
+using IndustrialIot.Shared.Common;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using Microsoft.Extensions.Time.Testing;
@@ -63,7 +65,7 @@ public class MonitorTests
             overrides,
             services =>
             {
-                services.AddSingleton<IPlcDriver>(new ClockAdvancingDriver(clock, TimeSpan.FromMilliseconds(250)));
+                services.UseDriver(new ClockAdvancingDriver(clock, TimeSpan.FromMilliseconds(250)));
                 services.AddSingleton<TimeProvider>(clock);
             },
             runAgentServices: true);
@@ -142,6 +144,107 @@ public class MonitorTests
         Assert.Equal(5000, plc.GetProperty("port").GetInt32());
         Assert.Equal(JsonValueKind.Null, plc.GetProperty("rack").ValueKind);
         Assert.Equal(JsonValueKind.Null, plc.GetProperty("slot").ValueKind);
+    }
+
+    [Fact]
+    public async Task Status_ListsEveryDevice_WithItsStateReadTimeAndTags()
+    {
+        var a = new FakePlcDriver();
+        var b = new FakePlcDriver();
+        var port = FreePort();
+        var settings = EdgeTestHost.MultiDevice(new Dictionary<string, string?>
+        {
+            ["Edge:Channels:0:Name"] = "S7",
+            ["Edge:Channels:0:Driver"] = "S7",
+            ["Edge:Channels:0:Devices:0:Name"] = "A",
+            ["Edge:Channels:0:Devices:0:Model"] = "S7-1200",
+            ["Edge:Channels:0:Devices:0:Host"] = "127.0.0.1",
+            ["Edge:Channels:0:Devices:0:Tags:0:Name"] = "Speed",
+            ["Edge:Channels:0:Devices:0:Tags:0:Address"] = "DB1.DBW2",
+            ["Edge:Channels:0:Devices:0:Tags:0:DataType"] = "Int",
+            ["Edge:Channels:1:Name"] = "Fx",
+            ["Edge:Channels:1:Driver"] = "Slmp3E",
+            ["Edge:Channels:1:Devices:0:Name"] = "Press",
+            ["Edge:Channels:1:Devices:0:Model"] = "FX5U",
+            ["Edge:Channels:1:Devices:0:Host"] = "127.0.0.2",
+            ["Edge:Channels:1:Devices:0:Port"] = "5000",
+            ["Edge:Channels:1:Devices:0:Tags:0:Name"] = "D100",
+            ["Edge:Channels:1:Devices:0:Tags:0:Address"] = "D100",
+            ["Edge:Channels:1:Devices:0:Tags:0:DataType"] = "Int",
+            ["Edge:Channels:1:Devices:1:Name"] = "Spare",
+            ["Edge:Channels:1:Devices:1:Model"] = "FX5U",
+            ["Edge:Channels:1:Devices:1:Host"] = "127.0.0.3",
+            ["Edge:Channels:1:Devices:1:Port"] = "5000",
+            ["Edge:Channels:1:Devices:1:Enabled"] = "false",
+            ["Edge:Monitor:Enabled"] = "true",
+            ["Edge:Monitor:Port"] = port.ToString(CultureInfo.InvariantCulture),
+        });
+        await using var edge = EdgeTestHost.Create(
+            settings,
+            services => services.AddSingleton<IPlcDriverFactory>(new FakeDriverFactory(device => device.Name == "A" ? a : b)),
+            runAgentServices: true);
+        await edge.Host.StartAsync();
+        using var http = Client(port);
+
+        var status = await WaitForStatusAsync(http, s => s.GetProperty("devices").EnumerateArray()
+            .Count(d => d.GetProperty("state").GetString() == "connected") == 2);
+
+        var devices = status.GetProperty("devices").EnumerateArray().ToList();
+        Assert.Equal(["A", "Press", "Spare"], devices.Select(d => d.GetProperty("name").GetString()));
+        Assert.Equal(["S7-1200", "FX5U", "FX5U"], devices.Select(d => d.GetProperty("model").GetString()));
+        Assert.Equal(["127.0.0.1", "127.0.0.2", "127.0.0.3"], devices.Select(d => d.GetProperty("host").GetString()));
+        Assert.Equal([102, 5000, 5000], devices.Select(d => d.GetProperty("port").GetInt32()));
+        Assert.Equal(["connected", "connected", "disabled"], devices.Select(d => d.GetProperty("state").GetString()));
+        Assert.All(devices.Take(2), d =>
+        {
+            Assert.Equal(JsonValueKind.Number, d.GetProperty("readMs").ValueKind);
+            Assert.Equal(JsonValueKind.String, d.GetProperty("lastGoodUtc").ValueKind);
+            Assert.Equal(JsonValueKind.Null, d.GetProperty("lastError").ValueKind);
+            Assert.True(d.TryGetProperty("requests", out _));
+        });
+        Assert.Equal(JsonValueKind.Null, devices[2].GetProperty("readMs").ValueKind);
+        var tags = status.GetProperty("tags").EnumerateArray().ToList();
+        Assert.Equal(["A.Speed", "Press.D100"], tags.Select(t => t.GetProperty("tagId").GetString()));
+        Assert.Equal(["A", "Press"], tags.Select(t => t.GetProperty("device").GetString()));
+        Assert.Equal(JsonValueKind.Null, status.GetProperty("plc").ValueKind);
+
+        // The page has the device table its script fills from devices[].
+        var page = await http.GetStringAsync("/");
+        Assert.Contains("id=\"devices\"", page, StringComparison.Ordinal);
+        Assert.Contains("s.devices.map", page, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Status_OfOneDevice_KeepsTheTopLevelPlcFields_AndListsItAsADevice()
+    {
+        var driver = new FakePlcDriver();
+        var port = FreePort();
+        await using var edge = await StartAsync(driver, port);
+        using var http = Client(port);
+
+        var status = await WaitForStatusAsync(http, s => s.GetProperty("lastCycleUtc").ValueKind != JsonValueKind.Null);
+
+        Assert.Equal("S7", status.GetProperty("plc").GetProperty("protocol").GetString());
+        Assert.Null(edge.Services.GetService<IPlcDriver>());
+        Assert.Null(edge.Services.GetService<SiemensS7Driver>());
+        var device = Assert.Single(status.GetProperty("devices").EnumerateArray());
+        Assert.Equal(("Plc1", "connected"), (device.GetProperty("name").GetString(), device.GetProperty("state").GetString()));
+        Assert.All(status.GetProperty("tags").EnumerateArray(), t => Assert.Equal("Plc1", t.GetProperty("device").GetString()));
+    }
+
+    [Fact]
+    public void Snapshot_KeepsEachDevicesLastGoodCycleTime_ThroughAnOutage()
+    {
+        var snapshot = new LiveTagSnapshot();
+        var t0 = DateTimeOffset.UnixEpoch.AddYears(56);
+        TagReading[] readings = [new("A.Speed", null, TelemetryQuality.Bad, t0, "PLC unreachable")];
+
+        snapshot.Publish("A", new PollCycle(t0, PlcUnavailable: false, readings, TimeSpan.FromMilliseconds(5)));
+        snapshot.Publish("B", new PollCycle(t0.AddSeconds(1), PlcUnavailable: true, readings, TimeSpan.FromMilliseconds(5)));
+        snapshot.Publish("A", new PollCycle(t0.AddSeconds(2), PlcUnavailable: true, readings, TimeSpan.FromMilliseconds(5)));
+
+        Assert.Equal(t0, snapshot.LastGoodUtc["A"]);
+        Assert.False(snapshot.LastGoodUtc.ContainsKey("B"));
     }
 
     [Fact]
@@ -230,7 +333,7 @@ public class MonitorTests
             overrides[key] = value;
         }
 
-        var edge = EdgeTestHost.Create(overrides, services => services.AddSingleton<IPlcDriver>(driver), runAgentServices: true);
+        var edge = EdgeTestHost.Create(overrides, services => services.UseDriver(driver), runAgentServices: true);
         await edge.Host.StartAsync();
         return edge;
     }
@@ -238,7 +341,7 @@ public class MonitorTests
     /// <summary>Starts the host while the driver holds the first read, so the status is captured before any cycle.</summary>
     private static async Task<JsonElement> StartAndReadStatusAsync(EdgeTestHost edge, HttpClient http)
     {
-        var driver = (ClockAdvancingDriver)edge.Services.GetRequiredService<IPlcDriver>();
+        var driver = (ClockAdvancingDriver)edge.Services.GetRequiredService<PlcDeviceRegistry>().Devices[0].Driver!;
         await edge.Host.StartAsync();
         await driver.Entered.WaitAsync(TimeSpan.FromSeconds(5));
         using var document = JsonDocument.Parse(await http.GetStringAsync("/api/status"));

@@ -102,7 +102,7 @@ public class ContractRoundTripTests
     [InlineData("command", """{"schemaVersion":1,"commandId":"5d1c2a3b-0000-4000-8000-000000000001","edgeId":"edge-01","tagId":"t","targetValue":1,"issuedAtUtc":"2026-10-13T08:00:00.000Z","expiresAtUtc":"2026-10-14T08:00:00.001Z","issuedBy":"u"}""")] // lifetime > 24 h
     [InlineData("command", """{"schemaVersion":1,"commandId":"5d1c2a3b-0000-4000-8000-000000000001","edgeId":"edge-01","tagId":"t","targetValue":1,"issuedAtUtc":"2026-10-13T08:00:00.000+07:00","expiresAtUtc":"2026-10-13T08:05:00.000Z","issuedBy":"u"}""")] // +07:00 offset
     [InlineData("command", """{"schemaVersion":1,"commandId":"5d1c2a3b-0000-4000-8000-000000000001","edgeId":"edge-01","tagId":"t","targetValue":1,"issuedAtUtc":"2026-10-13T08:00:00","expiresAtUtc":"2026-10-13T08:05:00.000Z","issuedBy":"u"}""")] // no offset
-    [InlineData("command", """{"schemaVersion":1,"commandId":"5d1c2a3b-0000-4000-8000-000000000001","edgeId":"edge-01","tagId":"t","targetValue":"1500","issuedAtUtc":"2026-10-13T08:00:00.000Z","expiresAtUtc":"2026-10-13T08:05:00.000Z","issuedBy":"u"}""")] // string targetValue
+    [InlineData("command", """{"schemaVersion":1,"commandId":"5d1c2a3b-0000-4000-8000-000000000001","edgeId":"edge-01","tagId":"t","targetValue":["1500"],"issuedAtUtc":"2026-10-13T08:00:00.000Z","expiresAtUtc":"2026-10-13T08:05:00.000Z","issuedBy":"u"}""")] // array targetValue
     [InlineData("command", """{"schemaVersion":1,"commandId":"5d1c2a3b-0000-4000-8000-000000000001","edgeId":"edge-01","tagId":"t","targetValue":null,"issuedAtUtc":"2026-10-13T08:00:00.000Z","expiresAtUtc":"2026-10-13T08:05:00.000Z","issuedBy":"u"}""")]
     [InlineData("command", """{"schemaVersion":1,"commandId":"00000000-0000-0000-0000-000000000000","edgeId":"edge-01","tagId":"t","targetValue":1,"issuedAtUtc":"2026-10-13T08:00:00.000Z","expiresAtUtc":"2026-10-13T08:05:00.000Z","issuedBy":"u"}""")]
     [InlineData("command", """{"schemaVersion":1,"commandId":"not-a-guid","edgeId":"edge-01","tagId":"t","targetValue":1,"issuedAtUtc":"2026-10-13T08:00:00.000Z","expiresAtUtc":"2026-10-13T08:05:00.000Z","issuedBy":"u"}""")]
@@ -120,6 +120,9 @@ public class ContractRoundTripTests
     [InlineData("telemetry", """{"schemaVersion":1,"edgeId":"edge-01","streamId":"0f8fad5b-d9cb-469f-a165-70867728950e","sequence":1,"tagId":"t","value":1,"quality":"bad","timestampUtc":"2026-10-13T08:00:00.000Z"}""")] // bad must be null
     [InlineData("telemetry", """{"schemaVersion":1,"edgeId":"edge-01","streamId":"0f8fad5b-d9cb-469f-a165-70867728950e","sequence":1,"tagId":"t","value":1,"quality":"excellent","timestampUtc":"2026-10-13T08:00:00.000Z"}""")]
     [InlineData("telemetry", """{"schemaVersion":1,"edgeId":"edge-01","streamId":"0f8fad5b-d9cb-469f-a165-70867728950e","sequence":1,"tagId":"t","value":{"x":1},"quality":"good","timestampUtc":"2026-10-13T08:00:00.000Z"}""")]
+    [InlineData("telemetry", """{"schemaVersion":1,"edgeId":"edge-01","streamId":"0f8fad5b-d9cb-469f-a165-70867728950e","sequence":1,"tagId":"t","value":["AB"],"quality":"good","timestampUtc":"2026-10-13T08:00:00.000Z"}""")]
+    [InlineData("telemetry", """{"schemaVersion":1,"edgeId":"edge-01","streamId":"0f8fad5b-d9cb-469f-a165-70867728950e","sequence":1,"tagId":"t","value":"A\uD800","quality":"good","timestampUtc":"2026-10-13T08:00:00.000Z"}""")] // lone surrogate
+    [InlineData("telemetry", """{"schemaVersion":1,"edgeId":"edge-01","streamId":"0f8fad5b-d9cb-469f-a165-70867728950e","sequence":1,"tagId":"t","value":"A\u0000B","quality":"good","timestampUtc":"2026-10-13T08:00:00.000Z"}""")] // NUL: jsonb cannot store it
     // CommandResult
     [InlineData("result", """{"schemaVersion":1,"commandId":"5d1c2a3b-0000-4000-8000-000000000001","edgeId":"edge-01","outcome":"rejected","reason":"Tag Not Writable","completedAtUtc":"2026-10-13T08:00:00.000Z"}""")]
     [InlineData("result", """{"schemaVersion":1,"commandId":"5d1c2a3b-0000-4000-8000-000000000001","edgeId":"edge-01","outcome":"done","completedAtUtc":"2026-10-13T08:00:00.000Z"}""")]
@@ -148,6 +151,37 @@ public class ContractRoundTripTests
     {
         // Only ContractValidationException may escape: never a raw JsonException.
         Assert.Throws<ContractValidationException>(() => Deserialize(kind, json));
+    }
+
+    [Theory]
+    [InlineData("telemetry")]
+    [InlineData("command")]
+    public void StringValue_RoundTripsAsWritten(string kind)
+    {
+        var json = kind == "telemetry"
+            ? TelemetryJson.Replace("\"value\":3.5", "\"value\":\"AB\"", StringComparison.Ordinal)
+            : CommandJson.Replace("\"targetValue\":1500", "\"targetValue\":\"AB\"", StringComparison.Ordinal);
+
+        var (value, serialized) = kind == "telemetry"
+            ? (ContractJson.Deserialize<TelemetryPayload>(json).Value, ContractJson.Serialize(ContractJson.Deserialize<TelemetryPayload>(json)))
+            : (ContractJson.Deserialize<DeviceCommand>(json).TargetValue, ContractJson.Serialize(ContractJson.Deserialize<DeviceCommand>(json)));
+
+        Assert.Equal("AB", value!.Value.GetString());
+        Assert.Equal(json, serialized);
+    }
+
+    [Fact]
+    public void StringValue_UpTo256Chars_IsAccepted_AndLongerIsRejectedNamingTheLimit()
+    {
+        var longest = SampleTelemetry() with { Value = JsonSerializer.SerializeToElement(new string('x', ContractJson.MaxStringValueLength)) };
+        var empty = SampleTelemetry() with { Value = JsonSerializer.SerializeToElement("") };
+        var tooLong = SampleTelemetry() with { Value = JsonSerializer.SerializeToElement(new string('x', ContractJson.MaxStringValueLength + 1)) };
+
+        Assert.Equal(256, ContractJson.MaxStringValueLength);
+        Assert.Equal(longest, ContractJson.Deserialize<TelemetryPayload>(ContractJson.Serialize(longest)));
+        Assert.Equal(empty, ContractJson.Deserialize<TelemetryPayload>(ContractJson.Serialize(empty)));
+        var ex = Assert.Throws<ContractValidationException>(() => ContractJson.Serialize(tooLong));
+        Assert.Contains("256", ex.Message, StringComparison.Ordinal);
     }
 
     [Fact]

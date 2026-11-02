@@ -57,6 +57,63 @@ public class S7BatchReadTests
     ];
 
     [Fact]
+    public async Task HundredTagsWithTenStrings200_Pdu240_AreReadWithoutExceedingThePdu()
+    {
+        await using var server = FakeS7Server.StartWithMemory(pduSize: 240);
+        var tags = new List<ResolvedTag>();
+        var expected = new List<object>();
+        for (var i = 0; i < 10; i++)
+        {
+            var address = $"DB2.DBB{i * 202}";
+            server.Seed(address, PlcValueConverterTests.S7String(max: 200, $"Recipe {i}"));
+            tags.Add(new ResolvedTag(address, PlcAddressParser.Parse(address), PlcDataType.String, false, null, null, Length: 200));
+            expected.Add($"Recipe {i}");
+        }
+
+        for (var i = 0; i < 90; i++)
+        {
+            var address = $"DB1.DBW{i * 2}";
+            server.Seed(address, 0, (byte)i);
+            tags.Add(Tag(address, PlcDataType.Int));
+            expected.Add((short)i);
+        }
+
+        await using var driver = CreateDriver(server);
+
+        var results = await driver.ReadAsync(tags, CancellationToken.None);
+
+        Assert.All(results, r => Assert.Null(r.Error));
+        Assert.Equal(expected, results.Select(r => r.Value));
+        Assert.True(ReadJobs(server).Length >= 10, $"jobs: {string.Join(",", ReadJobs(server))}");
+    }
+
+    [Fact]
+    public async Task AStringOrDtlThatDoesNotDecode_IsBadAlone_InsideAPackedRequest()
+    {
+        await using var server = FakeS7Server.StartWithMemory(pduSize: 240);
+        server.Seed("DB3.DBW0", 0, 7);
+        server.Seed("DB3.DBB2", PlcValueConverterTests.S7String(max: 20, "AB")[..12]); // STRING[20] read as Length 10
+        server.Seed("DB3.DBB14", PlcValueConverterTests.Dtl(2026, 13, 2, 1, 10, 15, 30, 0));
+        server.Seed("DB3.DBW26", 0, 9);
+        await using var driver = CreateDriver(server);
+
+        var results = await driver.ReadAsync(
+        [
+            Tag("DB3.DBW0", PlcDataType.Int),
+            new ResolvedTag("Recipe", PlcAddressParser.Parse("DB3.DBB2"), PlcDataType.String, false, null, null, Length: 10),
+            Tag("DB3.DBB14", PlcDataType.DTL),
+            Tag("DB3.DBW26", PlcDataType.Int),
+        ], CancellationToken.None);
+
+        Assert.Equal((short)7, results[0].Value);
+        Assert.IsType<PlcValueException>(results[1].Error);
+        Assert.Contains("STRING length mismatch", results[1].Error!.Message, StringComparison.Ordinal);
+        Assert.IsType<PlcValueException>(results[2].Error);
+        Assert.Equal((short)9, results[3].Value);
+        Assert.Equal([4], ReadJobs(server));
+    }
+
+    [Fact]
     public async Task LabTags_Pdu240_TwoJobs_ValuesMatchSeededMemory()
     {
         await using var server = FakeS7Server.StartWithMemory(pduSize: 240);

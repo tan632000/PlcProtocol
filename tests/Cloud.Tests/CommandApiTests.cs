@@ -74,6 +74,21 @@ public class CommandApiTests(PostgresFixture database)
     }
 
     [Fact]
+    public async Task StringTarget_IsPublishedAsWritten_AndOver256CharsIsRefused()
+    {
+        await using var ctx = await CommandTestKit.StartAsync(database);
+        var token = ctx.Host.CreateToken(["Operator"]);
+
+        var response = await ctx.PostAsync("edge-a", """{"tagId":"Line1.Recipe","value":"AB"}""", token);
+        var tooLong = await ctx.PostAsync("edge-a", $$"""{"tagId":"Line1.Recipe","value":"{{new string('x', 257)}}"}""", token);
+
+        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+        var id = (await CommandTestKit.JsonAsync(response)).GetProperty("commandId").GetGuid();
+        Assert.Equal("AB", ctx.PublishedCommands().Single(p => p.Command.CommandId == id).Command.TargetValue!.Value.GetString());
+        Assert.Equal(HttpStatusCode.BadRequest, tooLong.StatusCode);
+    }
+
+    [Fact]
     public async Task FloatToken_PublishedAsWritten()
     {
         await using var ctx = await CommandTestKit.StartAsync(database);
@@ -132,7 +147,8 @@ public class CommandApiTests(PostgresFixture database)
     [Theory]
     [InlineData("""{"tagId":"Line1.Speed","value":1200,"ttlSeconds":4}""", null, "ttlSeconds")]
     [InlineData("""{"tagId":"Line1.Speed","value":1200,"ttlSeconds":601}""", null, "ttlSeconds")]
-    [InlineData("""{"tagId":"Line1.Speed","value":"abc"}""", null, "targetValue")]
+    [InlineData("""{"tagId":"Line1.Speed","value":["abc"]}""", null, "targetValue")]
+    [InlineData("""{"tagId":"Line1.Speed","value":"A\u0000B"}""", null, "targetValue")] // jsonb cannot store U+0000
     [InlineData("""{"tagId":"Line1.Speed","value":null}""", null, "targetValue")]
     [InlineData("""{"tagId":"Line1.Speed","value":{"x":1}}""", null, "targetValue")]
     [InlineData("""{"value":1200}""", null, "tagId")]

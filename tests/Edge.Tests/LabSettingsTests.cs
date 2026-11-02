@@ -64,8 +64,8 @@ public sealed class LabSettingsTests
                 Assert.Equal(labDir, host.Services.GetRequiredService<IHostEnvironment>().ContentRootPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
                 Assert.Equal("Slmp", builder.Configuration["Edge:Plc:Protocol"]);
                 Assert.False(host.Services.GetRequiredService<IOptions<Commands.CommandsOptions>>().Value.Enabled);
-                Assert.Equal(ExpectedTags, host.Services.GetRequiredService<PlcTagCatalog>().Tags.Select(t => t.TagId));
-                Assert.NotEqual(typeof(SiemensS7Driver), host.Services.GetRequiredService<IPlcDriver>().GetType());
+                Assert.Equal(ExpectedTags, host.Services.GetRequiredService<PlcDeviceRegistry>().Devices[0].Catalog.Tags.Select(t => t.TagId));
+                Assert.NotEqual(typeof(SiemensS7Driver), host.Services.GetRequiredService<PlcDeviceRegistry>().Devices[0].Driver!.GetType());
 
                 await host.StopAsync();
             }
@@ -89,6 +89,70 @@ public sealed class LabSettingsTests
         var resolved = Path.GetFullPath(configured!, labDir);
 
         Assert.Equal(Path.Combine(RepoRoot(), "src", "Edge", "data", "fx5u-lab.db"), resolved);
+    }
+
+    [Fact]
+    public async Task MultiLabFolder_LoadsThreeDevicesOfAHundredTags_AndHostStartsAndStops()
+    {
+        var labDir = Path.Combine(RepoRoot(), "src", "Edge", "lab", "multi");
+        await using var s7 = FakeS7Server.StartWithMemory(pduSize: 240);
+        await using var fx5u = new FakeSlmpServer();
+        var bufferDir = Directory.CreateTempSubdirectory("lab-settings-");
+        try
+        {
+            // Same construction as Program.cs; the overrides keep the test off the lab PLCs, any real broker,
+            // the developer's port 5080 and src/Edge/data. The FX3U device is disabled in the file, so it opens nothing.
+            var builder = Host.CreateApplicationBuilder(["--contentRoot", labDir]);
+            builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Edge:Mqtt:Host"] = "no-broker.invalid",
+                ["Edge:Mqtt:Password"] = "not-a-secret-test",
+                ["Edge:Channels:0:Devices:0:Host"] = "127.0.0.1",
+                ["Edge:Channels:0:Devices:0:Port"] = s7.Port.ToString(),
+                ["Edge:Channels:1:Devices:0:Host"] = "127.0.0.1",
+                ["Edge:Channels:1:Devices:0:Port"] = fx5u.Port.ToString(),
+                ["Edge:Monitor:Port"] = FreePort().ToString(),
+                ["Edge:Buffer:Path"] = Path.Combine(bufferDir.FullName, "edge.db"),
+            });
+            builder.Services.AddEdgeAgent(builder.Configuration);
+
+            using (var host = builder.Build())
+            {
+                await host.StartAsync();
+
+                var devices = host.Services.GetRequiredService<PlcDeviceRegistry>().Devices;
+                Assert.Equal(["S7Lab", "Fx5uLab", "Fx3uLab"], devices.Select(d => d.Name));
+                Assert.All(devices, d => Assert.Equal(100, d.Catalog.Tags.Count));
+                Assert.All(devices, d => Assert.False(d.Device.WritesEnabled));
+                Assert.False(host.Services.GetRequiredService<IOptions<Commands.CommandsOptions>>().Value.Enabled);
+                Assert.Null(devices[2].Driver);
+
+                // The new types are on the PLCs that support them, and the far tags break the contiguous blocks.
+                Assert.Superset(new HashSet<PlcDataType> { PlcDataType.String, PlcDataType.LReal, PlcDataType.DTL }, devices[0].Catalog.Tags.Select(t => t.DataType).ToHashSet());
+                Assert.Superset(new HashSet<PlcDataType> { PlcDataType.String, PlcDataType.LReal }, devices[1].Catalog.Tags.Select(t => t.DataType).ToHashSet());
+                Assert.Contains(devices[0].Catalog.Tags, t => t.TagId == "S7Lab.FarName");
+                Assert.Contains(devices[1].Catalog.Tags, t => t.TagId == "Fx5uLab.FarReal");
+
+                await host.StopAsync();
+            }
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            bufferDir.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public void MultiLabBufferPath_ResolvesInsideTheIgnoredSrcEdgeDataFolder()
+    {
+        var labDir = Path.Combine(RepoRoot(), "src", "Edge", "lab", "multi");
+        var configured = new ConfigurationBuilder()
+            .SetBasePath(labDir)
+            .AddJsonFile("appsettings.json")
+            .Build()["Edge:Buffer:Path"];
+
+        Assert.Equal(Path.Combine(RepoRoot(), "src", "Edge", "data", "multi-lab.db"), Path.GetFullPath(configured!, labDir));
     }
 
     [Fact]

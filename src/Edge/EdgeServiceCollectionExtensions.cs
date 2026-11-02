@@ -1,5 +1,6 @@
 using IndustrialIot.Edge.Buffering;
 using IndustrialIot.Edge.Commands;
+using IndustrialIot.Edge.Configuration;
 using IndustrialIot.Edge.Drivers;
 using IndustrialIot.Edge.Drivers.Models;
 using IndustrialIot.Edge.Messaging;
@@ -28,6 +29,19 @@ public static class EdgeServiceCollectionExtensions
         configuration = EdgeSettingsFile.Compose(configuration, contentRoot, out var settingsFile);
         services.TryAddSingleton(settingsFile);
 
+        // The devices to run: Edge:Channels, or the single-PLC keys as one device. A multi-device configuration is
+        // checked here, at composition, so a bad device stops the start naming it.
+        var devices = EdgeDeviceResolver.Resolve(configuration);
+        if (!devices.MigratedFromV1)
+        {
+            PlcDeviceRegistry.ThrowIfInvalid(devices);
+        }
+
+        // Every consumer reaches a PLC through the registry: one driver per device, built from its own settings.
+        services.TryAddSingleton(devices);
+        services.TryAddSingleton<IPlcDriverFactory, PlcDriverFactory>();
+        services.TryAddSingleton<PlcDeviceRegistry>();
+
         var edgeSection = configuration.GetSection(EdgeOptions.SectionName);
 
         services.AddOptions<EdgeOptions>().Bind(edgeSection).ValidateOnStart();
@@ -35,14 +49,19 @@ public static class EdgeServiceCollectionExtensions
 
         // Off by default (read-only Edge); the listener checks it at start, and the protocol switch reads it first.
         services.AddOptions<CommandsOptions>().Bind(configuration.GetSection(CommandsOptions.SectionName)).ValidateOnStart();
-        services.AddPlcProtocol(configuration);
+        if (devices.MigratedFromV1)
+        {
+            // The single-PLC keys keep their own options, validators and messages. The driver it also registers is
+            // removed: the registry creates that PLC's only driver, so a second connection can never be opened.
+            services.AddPlcProtocol(configuration);
+            services.RemoveAll<IPlcDriver>();
+            services.RemoveAll<SiemensS7Driver>();
+            services.RemoveAll<Drivers.Slmp.MitsubishiSlmpDriver>();
 
-        // Bound from "Edge" (not "Edge:Tags"): the array Edge:Tags maps to PlcTagCatalogOptions.Tags.
-        services.AddOptions<PlcTagCatalogOptions>().Bind(edgeSection).ValidateOnStart();
-        services.TryAddEnumerable(ServiceDescriptor.Singleton<IValidateOptions<PlcTagCatalogOptions>, PlcTagCatalogOptionsValidator>());
-        services.TryAddSingleton(provider => new PlcTagCatalog(
-            provider.GetRequiredService<IOptions<PlcTagCatalogOptions>>().Value,
-            provider.GetRequiredService<IPlcAddressSyntax>()));
+            // Bound from "Edge" (not "Edge:Tags"): the array Edge:Tags maps to PlcTagCatalogOptions.Tags.
+            services.AddOptions<PlcTagCatalogOptions>().Bind(edgeSection).ValidateOnStart();
+            services.TryAddEnumerable(ServiceDescriptor.Singleton<IValidateOptions<PlcTagCatalogOptions>, PlcTagCatalogOptionsValidator>());
+        }
 
         services.TryAddSingleton(TimeProvider.System);
 

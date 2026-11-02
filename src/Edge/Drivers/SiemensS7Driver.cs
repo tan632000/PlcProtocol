@@ -15,7 +15,7 @@ namespace IndustrialIot.Edge.Drivers;
 /// complete PLC error reply inside a batch read (see <see cref="ReadAsync(IReadOnlyList{ResolvedTag}, CancellationToken)"/>):
 /// the reply was read in full, so the socket holds nothing stale.
 /// </summary>
-public sealed class SiemensS7Driver : IPlcDriver, IAsyncDisposable
+public sealed class SiemensS7Driver : IPlcDriver, IPlcReadStatistics, IAsyncDisposable
 {
     private const string AccessDeniedHint =
         "In TIA Portal enable \"Permit access with PUT/GET communication\" and disable \"Optimized block access\" on the DB.";
@@ -68,7 +68,7 @@ public sealed class SiemensS7Driver : IPlcDriver, IAsyncDisposable
             {
                 var address = RequireS7(tags[i].Address);
                 PlcValueConverter.EnsureCompatible(address, tags[i].DataType);
-                valid.Add(new S7Item(i, address, tags[i].DataType));
+                valid.Add(new S7Item(i, address, tags[i].DataType, tags[i].Length));
             }
             catch (Exception ex)
             {
@@ -93,7 +93,9 @@ public sealed class SiemensS7Driver : IPlcDriver, IAsyncDisposable
                 {
                     for (var k = 0; k < step.Packed.Count; k++)
                     {
-                        results[step.Packed[k].Index] = PlcReadResult.Ok(step.Values[k]);
+                        results[step.Packed[k].Index] = step.Values[k] is PlcValueException undecodable
+                            ? PlcReadResult.Fail(undecodable)
+                            : PlcReadResult.Ok(step.Values[k]);
                     }
                 }
 
@@ -105,7 +107,7 @@ public sealed class SiemensS7Driver : IPlcDriver, IAsyncDisposable
                     (tag, token) =>
                     {
                         requests++;
-                        return ReadOneAsync(tag.Address, tag.DataType, DefaultTimeout, isolating: true, token);
+                        return ReadOneAsync(tag.Address, tag.DataType, tag.Length, DefaultTimeout, isolating: true, token);
                     },
                     ct).ConfigureAwait(false);
                 for (var k = 0; k < solo.Count; k++)
@@ -148,14 +150,15 @@ public sealed class SiemensS7Driver : IPlcDriver, IAsyncDisposable
 
     /// <summary>Overload with an explicit budget so tests can make one caller give up sooner than another.</summary>
     internal Task<object> ReadAsync(IPlcAddress plcAddress, PlcDataType type, TimeSpan timeout, CancellationToken ct) =>
-        ReadOneAsync(plcAddress, type, timeout, isolating: false, ct);
+        ReadOneAsync(plcAddress, type, length: null, timeout, isolating: false, ct);
 
     /// <summary>
     /// One tag, one request. When <paramref name="isolating"/> (a batch tag read alone), a complete PLC error reply
     /// keeps the connection and remembers the tag, and a successful read forgets it; otherwise every failure
     /// discards the connection.
     /// </summary>
-    private async Task<object> ReadOneAsync(IPlcAddress plcAddress, PlcDataType type, TimeSpan timeout, bool isolating, CancellationToken ct)
+    private async Task<object> ReadOneAsync(
+        IPlcAddress plcAddress, PlcDataType type, int? length, TimeSpan timeout, bool isolating, CancellationToken ct)
     {
         var address = RequireS7(plcAddress);
         PlcValueConverter.EnsureCompatible(address, type);
@@ -171,7 +174,7 @@ public sealed class SiemensS7Driver : IPlcDriver, IAsyncDisposable
             try
             {
                 bytes = await plc.ReadBytesAsync(
-                    area, address.DbNumber, address.ByteOffset, Math.Max(address.SizeBytes, 1), operation.Token).ConfigureAwait(false);
+                    area, address.DbNumber, address.ByteOffset, ByteLength(address, type, length), operation.Token).ConfigureAwait(false);
             }
             catch (Exception ex)
             {
@@ -202,7 +205,7 @@ public sealed class SiemensS7Driver : IPlcDriver, IAsyncDisposable
                 _isolated.Remove(address.Canonical);
             }
 
-            return Decode(address, type, bytes);
+            return Decode(address, type, length, bytes);
         }
         finally
         {
@@ -242,7 +245,7 @@ public sealed class SiemensS7Driver : IPlcDriver, IAsyncDisposable
                 return new PackedStep(items.Count, [], items[start..], null);
             }
 
-            var count = S7ReadPlanner.Fit([.. positions.Select(p => ByteLength(items[p].Address))], 0, plc.MaxPDUSize);
+            var count = S7ReadPlanner.Fit([.. positions.Select(p => ByteLength(items[p]))], 0, plc.MaxPDUSize);
             var end = positions[count - 1] + 1;
             S7Item[] packed = [.. positions.Take(count).Select(p => items[p])];
             S7Item[] remembered = [.. items[start..end].Where(item => _isolated.Contains(item.Address.Canonical))];
@@ -254,7 +257,7 @@ public sealed class SiemensS7Driver : IPlcDriver, IAsyncDisposable
                 DB = item.Address.DbNumber,
                 StartByteAdr = item.Address.ByteOffset,
                 VarType = S7Net.VarType.Byte,
-                Count = ByteLength(item.Address),
+                Count = ByteLength(item),
             }).ToList();
 
             try
@@ -290,7 +293,7 @@ public sealed class SiemensS7Driver : IPlcDriver, IAsyncDisposable
                     byte[] array => array,
                     _ => null,
                 };
-                var expected = ByteLength(packed[k].Address);
+                var expected = ByteLength(packed[k]);
                 if (bytes is null || bytes.Length != expected)
                 {
                     Discard();
@@ -298,7 +301,15 @@ public sealed class SiemensS7Driver : IPlcDriver, IAsyncDisposable
                         $"Reading {packed[0].Address} failed: the PLC returned {bytes?.Length ?? 0} byte(s) for {packed[k].Address}, expected {expected}.");
                 }
 
-                values[k] = Decode(packed[k].Address, packed[k].Type, bytes);
+                try
+                {
+                    values[k] = Decode(packed[k].Address, packed[k].Type, packed[k].Length, bytes);
+                }
+                catch (PlcValueException ex)
+                {
+                    // The bytes arrived but cannot be this tag's value: only this tag is bad.
+                    values[k] = ex;
+                }
             }
 
             return new PackedStep(end, packed, remembered, values);
@@ -316,19 +327,32 @@ public sealed class SiemensS7Driver : IPlcDriver, IAsyncDisposable
         _logger.Log(level, "Read {TagCount} tag(s) in {RequestCount} request(s)", tagCount, requests);
     }
 
-    private static int ByteLength(PlcAddress address) => Math.Max(address.SizeBytes, 1);
+    public int LastBatchRequests => Volatile.Read(ref _lastRequestCount);
 
-    private static object Decode(PlcAddress address, PlcDataType type, byte[] bytes) =>
+    private static int ByteLength(S7Item item) => ByteLength(item.Address, item.Type, item.Length);
+
+    private static int ByteLength(PlcAddress address, PlcDataType type, int? length) =>
+        address.IsBit ? 1 : PlcValueConverter.S7ItemSize(type, length);
+
+    private static object Decode(PlcAddress address, PlcDataType type, int? length, byte[] bytes) =>
         type == PlcDataType.Bool
             ? ((bytes[0] >> address.BitOffset!.Value) & 1) == 1
-            : PlcValueConverter.FromBytes(type, bytes);
+            : PlcValueConverter.FromBytes(type, bytes, length);
 
     /// <summary>Overload with an explicit budget so tests can make one caller give up sooner than another.</summary>
     internal async Task WriteAsync(IPlcAddress plcAddress, PlcDataType type, object value, TimeSpan timeout, CancellationToken ct)
     {
         var address = RequireS7(plcAddress);
         PlcValueConverter.EnsureCompatible(address, type);
-        var bytes = PlcValueConverter.ToBytes(type, value);
+        if (address.ReadOnlyReason is { } readOnly)
+        {
+            throw new PlcAccessDeniedException(readOnly);
+        }
+
+        // A STRING keeps its byte 0 (the maximum the PLC declared): the write starts at byte 1, the current length.
+        var (offset, bytes) = type == PlcDataType.String
+            ? (address.ByteOffset + 1, PlcValueConverter.S7StringPayload(value as string ?? throw new PlcValueException("A String write needs text.")))
+            : (address.ByteOffset, PlcValueConverter.ToBytes(type, value));
 
         using var budget = new CancellationTokenSource(timeout);
         using var operation = CancellationTokenSource.CreateLinkedTokenSource(ct, budget.Token);
@@ -337,6 +361,13 @@ public sealed class SiemensS7Driver : IPlcDriver, IAsyncDisposable
         {
             var plc = await ConnectAsync(operation.Token, ct).ConfigureAwait(false);
             var area = ToS7Area(address.Area);
+            if (type == PlcDataType.String)
+            {
+                // The value is padded to the tag's Length (catalog); a PLC STRING of another maximum means the tag points
+                // elsewhere, and writing would run into the next variable. Checked under the same lock, before any write.
+                await EnsureStringMaximumAsync(plc, area, address, ((string)value).Length, operation.Token, ct).ConfigureAwait(false);
+            }
+
             try
             {
                 // Only the budget applies from here on. Cancelling a write that may already be on the wire would
@@ -348,7 +379,7 @@ public sealed class SiemensS7Driver : IPlcDriver, IAsyncDisposable
                 }
                 else
                 {
-                    await plc.WriteBytesAsync(area, address.DbNumber, address.ByteOffset, bytes, budget.Token).ConfigureAwait(false);
+                    await plc.WriteBytesAsync(area, address.DbNumber, offset, bytes, budget.Token).ConfigureAwait(false);
                 }
             }
             catch (Exception ex)
@@ -366,6 +397,31 @@ public sealed class SiemensS7Driver : IPlcDriver, IAsyncDisposable
         finally
         {
             Release();
+        }
+    }
+
+    /// <summary>Reads byte 0 of a STRING; refuses the write when the PLC declares another maximum. Nothing is written here.</summary>
+    private async Task EnsureStringMaximumAsync(
+        S7.Net.Plc plc, S7.Net.DataType area, PlcAddress address, int length, CancellationToken operationToken, CancellationToken ct)
+    {
+        byte[] declared;
+        try
+        {
+            declared = await plc.ReadBytesAsync(area, address.DbNumber, address.ByteOffset, 1, operationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            Discard();
+            ct.ThrowIfCancellationRequested();
+            throw IsPlcErrorResponse(ex)
+                ? new PlcAccessDeniedException($"PLC refused reading {address} before the write; nothing was written. {AccessDeniedHint}", ex)
+                : new PlcUnavailableException($"Reading {address} before the write failed; nothing was written: {ex.Message}", ex);
+        }
+
+        if (declared.Length != 1 || declared[0] != length)
+        {
+            throw new PlcAccessDeniedException(
+                $"STRING length mismatch at {address}: the PLC holds STRING[{(declared.Length == 1 ? declared[0] : -1)}], the tag Length is {length}; nothing was written.");
         }
     }
 
@@ -582,7 +638,7 @@ public sealed class SiemensS7Driver : IPlcDriver, IAsyncDisposable
             && methods.Any(method => name.Contains($"<{method}>", StringComparison.Ordinal));
     }
 
-    private readonly record struct S7Item(int Index, PlcAddress Address, PlcDataType Type);
+    private readonly record struct S7Item(int Index, PlcAddress Address, PlcDataType Type, int? Length);
 
     /// <summary>Result of one planned request: where the next one starts, what it read, and what to read alone.</summary>
     private sealed record PackedStep(int Next, IReadOnlyList<S7Item> Packed, IReadOnlyList<S7Item> Remembered, object[]? Values);

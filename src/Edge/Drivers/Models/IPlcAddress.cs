@@ -21,4 +21,12 @@ public interface IPlcAddressSyntax
     /// Throws a <see cref="PlcException"/> subtype with a user-facing message when it cannot.
     /// </summary>
     IPlcAddress Parse(string address, PlcDataType type);
+
+    /// <summary>
+    /// As <see cref="Parse(string, PlcDataType)"/> for a tag with a <paramref name="length"/> (String characters); a
+    /// protocol without String tags refuses any length.
+    /// </summary>
+    IPlcAddress Parse(string address, PlcDataType type, int? length) => length is null
+        ? Parse(address, type)
+        : throw new PlcValueException($"{type} tags with a Length are not supported by this protocol.");
 }

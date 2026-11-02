@@ -13,10 +13,10 @@ public enum SlmpDevice : byte
     Y = 0x9D,
 }
 
-/// <summary>A device and its number. Every SLMP address is read-only: the driver cannot write.</summary>
+/// <summary>A device and its number. X inputs are read-only; D, M and Y can be written.</summary>
 public sealed record SlmpAddress(SlmpDevice Device, int Number) : IPlcAddress
 {
-    public const string ReadOnlyText = "SLMP is read-only";
+    public const string InputReadOnlyText = "X inputs cannot be written";
 
     public string Canonical => Spell(Device, Number);
 
@@ -27,7 +27,7 @@ public sealed record SlmpAddress(SlmpDevice Device, int Number) : IPlcAddress
 
     public bool IsBit => Device != SlmpDevice.D;
 
-    public string? ReadOnlyReason => ReadOnlyText;
+    public string? ReadOnlyReason => Device == SlmpDevice.X ? InputReadOnlyText : null;
 
     public override string ToString() => Canonical;
 }
@@ -43,7 +43,12 @@ public sealed partial class SlmpAddressSyntax : IPlcAddressSyntax
     internal const int MaxM = 7679;
     internal const int MaxXY = 0x3FF; // 1777 octal
 
-    public IPlcAddress Parse(string address, PlcDataType type)
+    /// <summary>The longest FX String tag: 127 D registers of two characters each.</summary>
+    public const int MaxStringLength = 254;
+
+    public IPlcAddress Parse(string address, PlcDataType type) => Parse(address, type, null);
+
+    public IPlcAddress Parse(string address, PlcDataType type, int? length)
     {
         var match = address is null ? null : AddressPattern().Match(address.Trim());
         if (match is not { Success: true })
@@ -80,12 +85,20 @@ public sealed partial class SlmpAddressSyntax : IPlcAddressSyntax
                 : throw new PlcValueException($"Address '{parsed}' cannot hold a {type} value; {device} devices hold Bool.");
         }
 
-        if (type is not (PlcDataType.Int or PlcDataType.Word or PlcDataType.DInt or PlcDataType.DWord or PlcDataType.Real))
+        if (type is not (PlcDataType.Int or PlcDataType.Word or PlcDataType.DInt or PlcDataType.DWord or PlcDataType.Real
+            or PlcDataType.String or PlcDataType.LReal))
         {
-            throw new PlcValueException($"Address '{parsed}' cannot hold a {type} value; D registers hold Int, Word, DInt, DWord or Real.");
+            throw new PlcValueException(
+                $"Address '{parsed}' cannot hold a {type} value; D registers hold Int, Word, DInt, DWord, Real, LReal or String.");
         }
 
-        if (number + SlmpBlockPlanner.WordCount(type) - 1 > MaxD)
+        if (type == PlcDataType.String && length is not (>= 1 and <= MaxStringLength))
+        {
+            throw new PlcValueException(
+                $"FX String Length must be 1..{MaxStringLength} (was {length?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "missing"}).");
+        }
+
+        if (number + SlmpBlockPlanner.WordCount(type, length) - 1 > MaxD)
         {
             throw new PlcValueException($"Address '{parsed}' cannot hold a {type} value: it runs past D{MaxD}.");
         }

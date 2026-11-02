@@ -28,10 +28,12 @@ internal static class SlmpBlockPlanner
     /// <summary>Device number of word <paramref name="word"/>: a bit device word starts at a multiple of 16.</summary>
     public static int HeadDevice(SlmpDevice device, int word) => device == SlmpDevice.D ? word : word * 16;
 
-    public static int WordCount(PlcDataType type) => type switch
+    public static int WordCount(PlcDataType type, int? length = null) => type switch
     {
         PlcDataType.Int or PlcDataType.Word => 1,
         PlcDataType.DInt or PlcDataType.DWord or PlcDataType.Real => 2,
+        PlcDataType.LReal => 4,
+        PlcDataType.String => ((length ?? throw new PlcValueException("String tags need Length.")) + 1) / 2,
         _ => throw new PlcValueException($"{type} is not an SLMP word type."),
     };
 
@@ -81,9 +83,33 @@ internal static class SlmpBlockPlanner
         return blocks;
     }
 
-    /// <summary>Little-endian words, low word first, as the CLR type of <paramref name="type"/>.</summary>
-    public static object Decode(PlcDataType type, ReadOnlySpan<ushort> words)
+    /// <summary>
+    /// Little-endian words, low word first, as the CLR type of <paramref name="type"/>. A String takes two characters per
+    /// word, low byte first, up to the first NUL and at most <paramref name="length"/> characters (an odd Length leaves
+    /// the last register's high byte out).
+    /// </summary>
+    public static object Decode(PlcDataType type, ReadOnlySpan<ushort> words, int? length = null)
     {
+        if (type == PlcDataType.String)
+        {
+            var bytes = new byte[words.Length * 2];
+            for (var i = 0; i < words.Length; i++)
+            {
+                bytes[2 * i] = (byte)words[i];
+                bytes[(2 * i) + 1] = (byte)(words[i] >> 8);
+            }
+
+            var limit = Math.Min(length ?? bytes.Length, bytes.Length);
+            var end = Array.IndexOf(bytes, (byte)0, 0, limit);
+            return System.Text.Encoding.Latin1.GetString(bytes, 0, end < 0 ? limit : end);
+        }
+
+        if (type == PlcDataType.LReal)
+        {
+            var bits = words[0] | ((ulong)words[1] << 16) | ((ulong)words[2] << 32) | ((ulong)words[3] << 48);
+            return BitConverter.UInt64BitsToDouble(bits);
+        }
+
         var wordCount = WordCount(type);
         var combined = wordCount == 2 ? words[0] | ((uint)words[1] << 16) : 0u;
 

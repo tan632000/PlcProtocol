@@ -6,6 +6,104 @@ namespace IndustrialIot.Edge.Tests;
 
 public class PlcValueConverterTests
 {
+    [Fact]
+    public void S7String_ReturnsTheCurrentLengthChars()
+    {
+        Assert.Equal("AB", PlcValueConverter.FromBytes(PlcDataType.String, S7String(max: 10, "AB"), length: 10));
+        Assert.Equal(new string('x', 218), PlcValueConverter.FromBytes(PlcDataType.String, S7String(max: 218, new string('x', 218)), length: 218));
+        Assert.Equal("", PlcValueConverter.FromBytes(PlcDataType.String, S7String(max: 4, ""), length: 4));
+    }
+
+    [Fact]
+    public void S7String_WhoseDeclaredMaxIsNotTheTagLength_IsRefused()
+    {
+        var bytes = S7String(max: 20, "AB")[..12]; // STRING[20] read as Length 10
+
+        var ex = Assert.Throws<PlcValueException>(() => PlcValueConverter.FromBytes(PlcDataType.String, bytes, length: 10));
+
+        Assert.Contains("STRING length mismatch", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void S7String_WithACurrentLengthAboveItsMax_IsRefused()
+    {
+        var bytes = S7String(max: 4, "AB");
+        bytes[1] = 5;
+
+        Assert.Throws<PlcValueException>(() => PlcValueConverter.FromBytes(PlcDataType.String, bytes, length: 4));
+    }
+
+    [Fact]
+    public void S7LReal_IsBigEndian()
+    {
+        var bytes = new byte[8];
+        System.Buffers.Binary.BinaryPrimitives.WriteDoubleBigEndian(bytes, 1.5e300);
+
+        Assert.Equal(1.5e300, PlcValueConverter.FromBytes(PlcDataType.LReal, bytes));
+        Assert.NotEqual(1.5e300, PlcValueConverter.FromBytes(PlcDataType.LReal, [.. bytes.Reverse()]));
+    }
+
+    [Fact]
+    public void S7Dtl_IsThePlcLocalTimeWithoutAnOffset()
+    {
+        var bytes = Dtl(2026, 11, 2, weekday: 2, 10, 15, 30, nanoseconds: 123_456_789);
+
+        Assert.Equal("2026-11-02T10:15:30.123", PlcValueConverter.FromBytes(PlcDataType.DTL, bytes));
+        Assert.Equal("2262-04-11T23:47:16.854", PlcValueConverter.FromBytes(PlcDataType.DTL, Dtl(2262, 4, 11, 6, 23, 47, 16, 854_775_807)));
+    }
+
+    [Theory]
+    [InlineData(2026, 13, 2, 10, 15, 30, 0u)]
+    [InlineData(2026, 2, 30, 10, 15, 30, 0u)]
+    [InlineData(2026, 11, 2, 24, 0, 0, 0u)]
+    [InlineData(2026, 11, 2, 10, 60, 0, 0u)]
+    [InlineData(2026, 11, 2, 10, 15, 60, 0u)]
+    [InlineData(2026, 11, 2, 10, 15, 30, 1_000_000_000u)]
+    [InlineData(1969, 12, 31, 23, 59, 59, 0u)]
+    [InlineData(2262, 4, 11, 23, 47, 17, 0u)] // one second past the last DTL
+    [InlineData(2262, 12, 31, 0, 0, 0, 0u)]
+    public void S7Dtl_WithAFieldOutOfRange_IsRefused(int year, int month, int day, int hour, int minute, int second, uint nanoseconds)
+    {
+        Assert.Throws<PlcValueException>(() =>
+            PlcValueConverter.FromBytes(PlcDataType.DTL, Dtl(year, month, day, weekday: 1, hour, minute, second, nanoseconds)));
+    }
+
+    [Fact]
+    public void FxStringAndLReal_DecodeFromWords()
+    {
+        // "ABC" in D100-D101: two ASCII chars per register, low byte first; a NUL ends the text.
+        Assert.Equal("ABC", Drivers.Slmp.SlmpBlockPlanner.Decode(PlcDataType.String, [0x4241, 0x0043]));
+        Assert.Equal("AB", Drivers.Slmp.SlmpBlockPlanner.Decode(PlcDataType.String, [0x4241, 0x0000, 0x4443]));
+        Assert.Equal("ABC", Drivers.Slmp.SlmpBlockPlanner.Decode(PlcDataType.String, [0x4241, 0x4443], length: 3)); // D's high byte is not this tag
+
+        var bits = BitConverter.DoubleToInt64Bits(1.5e300);
+        ushort[] words = [(ushort)bits, (ushort)(bits >> 16), (ushort)(bits >> 32), (ushort)(bits >> 48)];
+        Assert.Equal(1.5e300, Drivers.Slmp.SlmpBlockPlanner.Decode(PlcDataType.LReal, words));
+    }
+
+    internal static byte[] S7String(int max, string text)
+    {
+        var bytes = new byte[max + 2];
+        bytes[0] = (byte)max;
+        bytes[1] = (byte)text.Length;
+        System.Text.Encoding.Latin1.GetBytes(text).CopyTo(bytes, 2);
+        return bytes;
+    }
+
+    internal static byte[] Dtl(int year, int month, int day, int weekday, int hour, int minute, int second, uint nanoseconds)
+    {
+        var bytes = new byte[12];
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt16BigEndian(bytes, (ushort)year);
+        bytes[2] = (byte)month;
+        bytes[3] = (byte)day;
+        bytes[4] = (byte)weekday;
+        bytes[5] = (byte)hour;
+        bytes[6] = (byte)minute;
+        bytes[7] = (byte)second;
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(bytes.AsSpan(8), nanoseconds);
+        return bytes;
+    }
+
     private static readonly string[] AddressesBySize = ["DB1.DBX0.0", "DB1.DBB0", "DB1.DBW0", "DB1.DBD0"];
 
     private static readonly Dictionary<PlcDataType, string> MatchingAddress = new()
@@ -17,6 +115,9 @@ public class PlcValueConverterTests
         [PlcDataType.DWord] = "DB1.DBD0",
         [PlcDataType.DInt] = "DB1.DBD0",
         [PlcDataType.Real] = "DB1.DBD0",
+        [PlcDataType.String] = "DB1.DBB0",
+        [PlcDataType.LReal] = "DB1.DBB0",
+        [PlcDataType.DTL] = "DB1.DBB0",
     };
 
     public static TheoryData<string, PlcDataType> MismatchedPairs()

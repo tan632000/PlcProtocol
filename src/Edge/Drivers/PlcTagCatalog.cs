@@ -1,7 +1,9 @@
 using System.Diagnostics.CodeAnalysis;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using IndustrialIot.Edge.Drivers.Mc1e;
 using IndustrialIot.Edge.Drivers.Models;
+using IndustrialIot.Edge.Drivers.Slmp;
 using IndustrialIot.Shared.Common;
 
 namespace IndustrialIot.Edge.Drivers;
@@ -12,14 +14,18 @@ public sealed class PlcTagCatalogOptions
     public PlcTagDefinition[] Tags { get; set; } = [];
 }
 
-/// <summary>A catalog tag whose address has been parsed and checked against its data type.</summary>
+/// <summary>
+/// A catalog tag whose address has been parsed and checked against its data type. <see cref="Length"/>: characters of
+/// a String tag, null for every other type.
+/// </summary>
 public sealed record ResolvedTag(
     string TagId,
     IPlcAddress Address,
     PlcDataType DataType,
     bool Writable,
     decimal? Min,
-    decimal? Max);
+    decimal? Max,
+    int? Length = null);
 
 /// <summary>
 /// Outcome of <see cref="PlcTagCatalog.EvaluateWrite"/>. When <see cref="Allowed"/> is false,
@@ -67,6 +73,29 @@ public sealed partial class PlcTagCatalog
         EnsureWritableTagsDoNotOverlap();
     }
 
+    private PlcTagCatalog(IReadOnlyList<ResolvedTag> tags)
+    {
+        foreach (var tag in tags)
+        {
+            if (!_tags.TryAdd(tag.TagId, tag))
+            {
+                throw new InvalidOperationException($"Tag catalog: duplicate tagId '{tag.TagId}' (ids are case-insensitive).");
+            }
+        }
+
+        Tags = [.. tags];
+    }
+
+    /// <summary>
+    /// Several PLCs' catalogs as one view, in the given order. Each was checked when it was built; writable overlap
+    /// is not checked again, because it is a rule within one PLC and two PLCs may use the same address.
+    /// </summary>
+    public static PlcTagCatalog Union(IEnumerable<PlcTagCatalog> catalogs)
+    {
+        ArgumentNullException.ThrowIfNull(catalogs);
+        return new PlcTagCatalog([.. catalogs.SelectMany(catalog => catalog.Tags)]);
+    }
+
     /// <summary>All tags in configuration order (the order the poller reads them).</summary>
     public IReadOnlyList<ResolvedTag> Tags { get; }
 
@@ -104,6 +133,19 @@ public sealed partial class PlcTagCatalog
             return WriteDecision.Deny(CommandReasons.InvalidValue, tag);
         }
 
+        if (tag.DataType == PlcDataType.String)
+        {
+            // One byte per character on the PLC, and never more than the tag's Length: a longer text would overwrite
+            // whatever follows. Padding with NULs clears the rest of a Mitsubishi string's registers.
+            var text = (string)value;
+            if (tag.Length is not { } length || text.Length > length || text.Any(c => c > '\u00FF'))
+            {
+                return WriteDecision.Deny(CommandReasons.InvalidValue, tag);
+            }
+
+            value = text.PadRight(length, '\0');
+        }
+
         return IsWithinBounds(tag, value)
             ? WriteDecision.Allow(tag, value)
             : WriteDecision.Deny(CommandReasons.ValueOutOfRange, tag);
@@ -119,7 +161,14 @@ public sealed partial class PlcTagCatalog
                 && (tag.Max is not { } max || real <= (float)max);
         }
 
-        if (value is bool)
+        if (value is double lreal)
+        {
+            // An LReal can exceed decimal's range (1e300), so compare as double.
+            return (tag.Min is not { } min || lreal >= (double)min)
+                && (tag.Max is not { } max || lreal <= (double)max);
+        }
+
+        if (value is bool or string or DateTime)
         {
             return true;
         }
@@ -141,10 +190,17 @@ public sealed partial class PlcTagCatalog
             throw Invalid(definition, "tagId must be 1..64 chars [A-Za-z0-9_.-]");
         }
 
+        if (definition.DataType == PlcDataType.String ? definition.Length is not > 0 : definition.Length is not null)
+        {
+            throw Invalid(definition, definition.DataType == PlcDataType.String
+                ? "String tags need Length (characters, at least 1)"
+                : "Length applies to String tags only");
+        }
+
         IPlcAddress address;
         try
         {
-            address = syntax.Parse(definition.Address, definition.DataType);
+            address = syntax.Parse(definition.Address, definition.DataType, definition.Length);
         }
         catch (PlcException ex)
         {
@@ -158,7 +214,8 @@ public sealed partial class PlcTagCatalog
 
         ValidateBounds(definition);
 
-        return new ResolvedTag(definition.TagId, address, definition.DataType, definition.Writable, definition.Min, definition.Max);
+        return new ResolvedTag(
+            definition.TagId, address, definition.DataType, definition.Writable, definition.Min, definition.Max, definition.Length);
     }
 
     private static void ValidateBounds(PlcTagDefinition definition)
@@ -168,9 +225,9 @@ public sealed partial class PlcTagCatalog
             return;
         }
 
-        if (definition.DataType == PlcDataType.Bool)
+        if (definition.DataType is PlcDataType.Bool or PlcDataType.String or PlcDataType.DTL)
         {
-            throw Invalid(definition, "Min/Max are not allowed on Bool tags");
+            throw Invalid(definition, $"Min/Max are not allowed on {definition.DataType} tags");
         }
 
         if (definition.Min > definition.Max)
@@ -196,11 +253,9 @@ public sealed partial class PlcTagCatalog
         var tags = _tags.Values.ToArray();
         foreach (var writable in tags.Where(t => t.Writable))
         {
-            if (writable.Address is not PlcAddress writableAddress)
-            {
-                throw new InvalidOperationException(
-                    $"Tag catalog: writable tag '{writable.TagId}' has a non-S7 address; the overlap check only supports S7 addresses.");
-            }
+            var mine = Footprint(writable)
+                ?? throw new InvalidOperationException(
+                    $"Tag catalog: writable tag '{writable.TagId}' has an address the overlap check does not know ({writable.Address.Canonical}).");
 
             foreach (var other in tags)
             {
@@ -209,13 +264,11 @@ public sealed partial class PlcTagCatalog
                     continue;
                 }
 
-                if (other.Address is not PlcAddress otherAddress)
-                {
-                    throw new InvalidOperationException(
-                        $"Tag catalog: tag '{other.TagId}' has a non-S7 address; the overlap check only supports S7 addresses.");
-                }
+                var theirs = Footprint(other)
+                    ?? throw new InvalidOperationException(
+                        $"Tag catalog: tag '{other.TagId}' has an address the overlap check does not know ({other.Address.Canonical}).");
 
-                if (Overlaps(writableAddress, otherAddress))
+                if (mine.Space == theirs.Space && mine.Start < theirs.End && theirs.Start < mine.End)
                 {
                     throw new InvalidOperationException(
                         $"Tag catalog: writable tag '{writable.TagId}' ({writable.Address}) overlaps tag '{other.TagId}' ({other.Address}).");
@@ -224,22 +277,21 @@ public sealed partial class PlcTagCatalog
         }
     }
 
-    private static bool Overlaps(PlcAddress a, PlcAddress b)
+    /// <summary>
+    /// The memory a tag occupies, with its real size: S7 in bits of one area and DB (a bit is one bit, anything else
+    /// its whole item: String Length + 2 bytes, LReal 8, DTL 12); Mitsubishi D in registers (String ceil(Length/2),
+    /// LReal 4, DInt/DWord/Real 2) and bit devices in points. Null for an address of another kind.
+    /// </summary>
+    private static (string Space, long Start, long End)? Footprint(ResolvedTag tag) => tag.Address switch
     {
-        if (a.Area != b.Area || a.DbNumber != b.DbNumber)
-        {
-            return false;
-        }
-
-        if (a.IsBit && b.IsBit && a.ByteOffset == b.ByteOffset)
-        {
-            return a.BitOffset == b.BitOffset;
-        }
-
-        var aEnd = a.ByteOffset + Math.Max(a.SizeBytes, 1);
-        var bEnd = b.ByteOffset + Math.Max(b.SizeBytes, 1);
-        return a.ByteOffset < bEnd && b.ByteOffset < aEnd;
-    }
+        PlcAddress { IsBit: true } s7 => ($"S7:{s7.Area}:{s7.DbNumber}", (s7.ByteOffset * 8L) + s7.BitOffset!.Value, (s7.ByteOffset * 8L) + s7.BitOffset!.Value + 1),
+        PlcAddress s7 => ($"S7:{s7.Area}:{s7.DbNumber}", s7.ByteOffset * 8L, (s7.ByteOffset + PlcValueConverter.S7ItemSize(tag.DataType, tag.Length)) * 8L),
+        SlmpAddress { IsBit: true } bit => ($"SLMP:{bit.Device}", bit.Number, bit.Number + 1),
+        SlmpAddress word => ($"SLMP:{word.Device}", word.Number, word.Number + SlmpBlockPlanner.WordCount(tag.DataType, tag.Length)),
+        Mc1eAddress { IsBit: true } bit => ($"MC1E:{bit.Device}", bit.Number, bit.Number + 1),
+        Mc1eAddress word => ($"MC1E:{word.Device}", word.Number, word.Number + SlmpBlockPlanner.WordCount(tag.DataType, tag.Length)),
+        _ => null,
+    };
 
     private static InvalidOperationException Invalid(PlcTagDefinition definition, string reason, Exception? inner = null) =>
         new($"Tag catalog: tag '{definition.TagId}' is invalid: {reason}.", inner);

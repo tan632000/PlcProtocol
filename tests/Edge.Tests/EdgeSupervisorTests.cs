@@ -9,6 +9,7 @@ using IndustrialIot.Edge.Tests.Fakes;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 
 namespace IndustrialIot.Edge.Tests;
 
@@ -20,6 +21,7 @@ namespace IndustrialIot.Edge.Tests;
 public sealed class EdgeSupervisorTests : IAsyncDisposable
 {
     private readonly string _contentRoot = Directory.CreateTempSubdirectory("edge-supervisor-").FullName;
+    private readonly WarningCapture _warnings = new();
     private IHost? _outer;
 
     public async ValueTask DisposeAsync()
@@ -75,6 +77,89 @@ public sealed class EdgeSupervisorTests : IAsyncDisposable
         await Task.Delay(300);
         Assert.Equal(1, plc.OpenConnections);
         Assert.Equal(["New.One"], Tags(supervisor.Inner!));
+    }
+
+    [Fact]
+    public async Task AppliedSave_LogsEachWriteChange_WithItsApplyId()
+    {
+        await StartAsync();
+        var restarter = Restarter();
+        WriteChange[] changes = [new("device", "Line", false, true), new("tag", "Line.Setpoint", false, true)];
+
+        Assert.True(restarter.TryRequest(Settings("New.One"), out var applyId, changes));
+        restarter.Release(applyId);
+        var status = await WaitForFinalAsync(restarter, applyId);
+
+        Assert.Equal(ApplyState.Applied, status.State);
+        var logged = WriteChangeWarnings();
+        Assert.Equal(2, logged.Count);
+        Assert.Contains(logged, w => w.Contains("device Line off -> on") && w.Contains(applyId));
+        Assert.Contains(logged, w => w.Contains("tag Line.Setpoint off -> on") && w.Contains(applyId));
+    }
+
+    [Fact]
+    public async Task RolledBackSave_LogsNoWriteChange()
+    {
+        var builds = 0;
+        await StartAsync(configureInner: services =>
+        {
+            // Build 2 is the apply: it fails, so the write permissions it carried never held.
+            if (Interlocked.Increment(ref builds) == 2)
+            {
+                services.AddHostedService<ThrowingHostedService>();
+            }
+        });
+        var restarter = Restarter();
+
+        Assert.True(restarter.TryRequest(Settings("New.Broken"), out var applyId, [new("device", "Line", false, true)]));
+        restarter.Release(applyId);
+        var status = await WaitForFinalAsync(restarter, applyId);
+
+        Assert.Equal(ApplyState.RolledBack, status.State);
+        Assert.Empty(WriteChangeWarnings());
+    }
+
+    [Fact]
+    public async Task SaveWithoutWriteChanges_LogsNone()
+    {
+        await StartAsync();
+        var restarter = Restarter();
+
+        var status = await WaitForFinalAsync(restarter, Apply(restarter, Settings("New.One")));
+
+        Assert.Equal(ApplyState.Applied, status.State);
+        Assert.Empty(WriteChangeWarnings());
+    }
+
+    [Fact]
+    public void WriteChanges_CompareTheEffectiveWriteSets()
+    {
+        var line = Device("Line", writes: false, Tag("Setpoint", writable: true), Tag("Speed", writable: false));
+
+        // Turned on in place: the device, and the tag whose permission now holds.
+        Assert.Equal(
+            [new WriteChange("device", "Line", false, true), new WriteChange("tag", "Line.Setpoint", false, true)],
+            SettingsService.WriteChanges(Running(line), Proposed(Device("Line", writes: true, Tag("Setpoint", writable: true), Tag("Speed", writable: false)))));
+
+        // Deleted and re-added under another name on the same PLC: the new device's permissions are new.
+        Assert.Equal(
+            [new WriteChange("device", "Line1b", false, true), new WriteChange("tag", "Line1b.Sp", false, true)],
+            SettingsService.WriteChanges(Running(line), Proposed(Device("Line1b", writes: true, Tag("Sp", writable: true)))));
+
+        // A writable tag renamed: the old TagId loses it, the new one gains it.
+        var writing = Device("Line", writes: true, Tag("Setpoint", writable: true));
+        Assert.Equal(
+            [new WriteChange("tag", "Line.Setpoint", true, false), new WriteChange("tag", "Line.Target", false, true)],
+            SettingsService.WriteChanges(Running(writing), Proposed(Device("Line", writes: true, Tag("Target", writable: true)))));
+
+        // A device with writes on deleted.
+        Assert.Equal(
+            [new WriteChange("device", "Line", true, false), new WriteChange("tag", "Line.Setpoint", true, false)],
+            SettingsService.WriteChanges(Running(writing), Proposed(Device("Other", writes: false))));
+
+        // Nothing changed, or only fields other than the permissions.
+        Assert.Empty(SettingsService.WriteChanges(Running(writing), Proposed(Device("Line", writes: true, Tag("Setpoint", writable: true)))));
+        Assert.Empty(SettingsService.WriteChanges(Running(line), Proposed(Device("Line", writes: false, Tag("Setpoint", writable: true)))));
     }
 
     [Fact]
@@ -375,6 +460,7 @@ public sealed class EdgeSupervisorTests : IAsyncDisposable
 
         var builder = Host.CreateEmptyApplicationBuilder(new HostApplicationBuilderSettings { ContentRootPath = _contentRoot });
         builder.Configuration.AddInMemoryCollection(settings);
+        builder.Logging.AddProvider(_warnings);
         builder.Services.AddEdgeSupervisor(options =>
         {
             options.BindRetry = bindRetry ?? TimeSpan.FromSeconds(1);
@@ -410,6 +496,20 @@ public sealed class EdgeSupervisorTests : IAsyncDisposable
     }
 
     private EdgeRestarter Restarter() => _outer!.Services.GetRequiredService<EdgeRestarter>();
+
+    private List<string> WriteChangeWarnings() => [.. _warnings.Entries.Where(w => w.Contains("Write permission changed", StringComparison.Ordinal))];
+
+    private static Configuration.EdgeDeviceSet Running(Configuration.DeviceOptions device) =>
+        new([Configuration.EdgeDeviceResolver.ToDevice(new Configuration.ChannelOptions { Name = "S7" }, Configuration.PlcDriverKind.S7, device)], MigratedFromV1: false);
+
+    private static Configuration.EdgeChannelsOptions Proposed(Configuration.DeviceOptions device) =>
+        new() { Channels = [new Configuration.ChannelOptions { Name = "S7", Driver = "S7", Devices = [device] }] };
+
+    private static Configuration.DeviceOptions Device(string name, bool writes, params Configuration.DeviceTagOptions[] tags) =>
+        new() { Name = name, Model = "S7-1200", Host = "10.0.0.1", WritesEnabled = writes, Tags = tags };
+
+    private static Configuration.DeviceTagOptions Tag(string name, bool writable) =>
+        new() { Name = name, Address = "DB1.DBW0", DataType = "Int", Writable = writable };
 
     private static string Apply(EdgeRestarter restarter, byte[] bytes)
     {
@@ -541,6 +641,36 @@ public sealed class EdgeSupervisorTests : IAsyncDisposable
         {
             await _release;
             _listener?.Stop();
+        }
+    }
+
+    /// <summary>Warnings logged by the outer host (the supervisor's own logger), as formatted text.</summary>
+    private sealed class WarningCapture : ILoggerProvider
+    {
+        private readonly System.Collections.Concurrent.ConcurrentQueue<string> _entries = new();
+
+        public IReadOnlyList<string> Entries => [.. _entries];
+
+        public ILogger CreateLogger(string categoryName) => new Logger(_entries);
+
+        public void Dispose()
+        {
+        }
+
+        private sealed class Logger(System.Collections.Concurrent.ConcurrentQueue<string> entries) : ILogger
+        {
+            public IDisposable? BeginScope<TState>(TState state)
+                where TState : notnull => null;
+
+            public bool IsEnabled(LogLevel logLevel) => logLevel == LogLevel.Warning;
+
+            public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+            {
+                if (logLevel == LogLevel.Warning)
+                {
+                    entries.Enqueue(formatter(state, exception));
+                }
+            }
         }
     }
 

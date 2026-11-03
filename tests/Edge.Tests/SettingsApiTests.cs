@@ -1,25 +1,28 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Globalization;
 using System.Net;
-using System.Net.Http.Headers;
 using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using IndustrialIot.Edge.Drivers;
 using IndustrialIot.Edge.Settings;
 using IndustrialIot.Edge.Tests.Fakes;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
 namespace IndustrialIot.Edge.Tests;
 
 /// <summary>
-/// The settings API on the loopback monitor, run under the real supervisor: it reads the effective settings, checks
-/// proposed ones with the Edge's own validators and the writable rule, and saves and applies them only for the holder
-/// of the settings password, from the operator's own page. Every refusal leaves the file and the lockout untouched.
+/// The settings API on the loopback monitor, run under the real supervisor with fake PLC drivers: it shows the Edge's
+/// channels, devices and tags as one tree (a single-PLC Edge as its migrated device), checks a proposed tree alone with
+/// the Edge's own validators, pins every error to its node, and saves a schema-2 file only for the holder of the
+/// settings password, from the operator's own page. Every refusal leaves the file and the lockout untouched.
 /// </summary>
 public sealed class SettingsApiTests : IAsyncDisposable
 {
@@ -49,39 +52,193 @@ public sealed class SettingsApiTests : IAsyncDisposable
     }
 
     [Fact]
-    public async Task Get_ShowsTheDefaults_ThenTheSavedFile()
+    public async Task Get_OnASinglePlcEdge_ShowsItAsDevicePlc1_WithLegacyTagIds()
     {
         await StartAsync();
 
-        var before = await GetSettingsAsync();
-        Assert.Equal("defaults", before.GetProperty("source").GetString());
-        Assert.Equal(EdgeSettingsFile.NoFileRevision, before.GetProperty("revision").GetString());
-        Assert.True(before.GetProperty("passwordSet").GetBoolean());
-        Assert.Equal("S7", before.GetProperty("settings").GetProperty("plc").GetProperty("protocol").GetString());
+        var get = await GetSettingsAsync();
 
-        var applyId = await SaveAndWaitAsync(Proposed(tags: [Tag("New.One", "DB5.DBW0")]));
-
-        var after = await GetSettingsAsync();
-        Assert.Equal("file", after.GetProperty("source").GetString());
-        Assert.Equal(Revision(File.ReadAllBytes(SettingsPath())), after.GetProperty("revision").GetString());
-        Assert.Equal("New.One", after.GetProperty("settings").GetProperty("tags")[0].GetProperty("tagId").GetString());
-        Assert.NotEmpty(applyId);
+        Assert.Equal("defaults", get.GetProperty("source").GetString());
+        Assert.Equal(EdgeSettingsFile.NoFileRevision, get.GetProperty("revision").GetString());
+        Assert.True(get.GetProperty("passwordSet").GetBoolean());
+        Assert.False(get.GetProperty("commandsEnabled").GetBoolean());
+        Assert.Empty(get.GetProperty("warnings").EnumerateArray());
+        Assert.False(get.TryGetProperty("writableTags", out _));
+        var channel = Assert.Single(get.GetProperty("settings").GetProperty("channels").EnumerateArray());
+        Assert.Equal("S7", channel.GetProperty("driver").GetString());
+        var device = Assert.Single(channel.GetProperty("devices").EnumerateArray());
+        Assert.Equal("Plc1", device.GetProperty("name").GetString());
+        Assert.Equal("S7-1200", device.GetProperty("model").GetString());
+        Assert.True(device.GetProperty("legacyTagIds").GetBoolean());
+        Assert.Equal(_plcPort, device.GetProperty("port").GetInt32());
+        Assert.Equal(["Line1.Speed"], device.GetProperty("tags").EnumerateArray().Select(t => t.GetProperty("name").GetString()));
     }
 
     [Fact]
-    public async Task ValidPut_Is202_AndTheNewHostReportsThatApplyAsApplied()
+    public async Task Get_ListsTheModels_WithDefaultsHintsAndWriteGuard()
     {
         await StartAsync();
 
-        using var response = await PutAsync(Body(await RevisionAsync(), Password, Proposed(tags: [Tag("New.One", "DB5.DBW0")], intervalMs: 500)));
-        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
-        var applyId = (await ReadJsonAsync(response)).GetProperty("applyId").GetString()!;
+        var models = (await GetSettingsAsync()).GetProperty("models").EnumerateArray().ToDictionary(m => m.GetProperty("name").GetString()!);
 
-        var apply = await WaitForApplyAsync(applyId);
-        Assert.Equal("applied", apply.GetProperty("state").GetString());
-        Assert.Equal(Revision(File.ReadAllBytes(SettingsPath())), apply.GetProperty("revision").GetString());
+        Assert.Equal(["S7-1200", "FX5U", "FX3U"], models.Keys);
+        var s7 = models["S7-1200"];
+        Assert.Equal("S7", s7.GetProperty("driver").GetString());
+        Assert.Equal(102, s7.GetProperty("defaultPort").GetInt32());
+        Assert.Equal(0, s7.GetProperty("defaultRack").GetInt32());
+        Assert.Equal(1, s7.GetProperty("defaultSlot").GetInt32());
+        Assert.Contains("DTL", s7.GetProperty("dataTypes").EnumerateArray().Select(t => t.GetString()));
+        Assert.True(s7.GetProperty("writesAllowed").GetBoolean());
+        var fx5u = models["FX5U"];
+        Assert.Equal(JsonValueKind.Null, fx5u.GetProperty("defaultPort").ValueKind);
+        Assert.Contains("GX Works3", fx5u.GetProperty("portHint").GetString());
+        Assert.DoesNotContain("DTL", fx5u.GetProperty("dataTypes").EnumerateArray().Select(t => t.GetString()));
+        Assert.False(models["FX3U"].GetProperty("writesAllowed").GetBoolean());
+        Assert.Equal("Mc1E", models["FX3U"].GetProperty("driver").GetString());
+    }
+
+    [Fact]
+    public async Task Get_OnASinglePlcS71500_WarnsThatTheCpuTypeIsNotKept()
+    {
+        await StartAsync(extra: new() { ["Edge:Plc:CpuType"] = "S71500" });
+
+        var warnings = (await GetSettingsAsync()).GetProperty("warnings").EnumerateArray().Select(w => w.GetString());
+
+        Assert.Equal(["cpuType-not-kept"], warnings);
+    }
+
+    [Fact]
+    public async Task Put_TwoBrandsTwoPlcsEach_WritesSchema2_AndRunsEveryDevice()
+    {
+        await StartAsync();
+
+        await SaveAndWaitAsync(TwoByTwo());
+
+        using (var file = JsonDocument.Parse(File.ReadAllBytes(SettingsPath())))
+        {
+            Assert.Equal(2, file.RootElement.GetProperty("SchemaVersion").GetInt32());
+        }
+
         var status = await GetJsonAsync("/api/status");
-        Assert.Equal(500, status.GetProperty("pollIntervalMs").GetInt32());
+        Assert.Equal(
+            ["Fx5uA", "Fx5uB", "S7A", "S7B"],
+            status.GetProperty("devices").EnumerateArray().Select(d => d.GetProperty("name").GetString()).Order());
+        Assert.Contains("S7A.Speed", status.GetProperty("tags").EnumerateArray().Select(t => t.GetProperty("tagId").GetString()));
+        var get = await GetSettingsAsync();
+        Assert.Equal("file", get.GetProperty("source").GetString());
+        Assert.Equal(2, get.GetProperty("settings").GetProperty("channels").GetArrayLength());
+    }
+
+    [Theory]
+    [InlineData("S7")]
+    [InlineData("Slmp")]
+    public async Task SinglePlcEdge_SavedUnchanged_PublishesTheSameTagIds(string protocol)
+    {
+        var extra = protocol == "Slmp"
+            ? new Dictionary<string, string?> { ["Edge:Plc:Protocol"] = "Slmp", ["Edge:Plc:TimeoutMs"] = "1000", ["Edge:Tags:0:Address"] = "D100", ["Edge:Tags:1:TagId"] = "Line1.Count", ["Edge:Tags:1:Address"] = "D102", ["Edge:Tags:1:DataType"] = "Int" }
+            : new Dictionary<string, string?> { ["Edge:Tags:1:TagId"] = "Line1.Count", ["Edge:Tags:1:Address"] = "DB1.DBW6", ["Edge:Tags:1:DataType"] = "Int" };
+        await StartAsync(extra: extra);
+        var before = TagIds(await GetJsonAsync("/api/status"));
+
+        var settings = JsonNode.Parse((await GetSettingsAsync()).GetProperty("settings").GetRawText())!.AsObject();
+        await SaveAndWaitAsync(settings);
+
+        Assert.Equal(["Line1.Count", "Line1.Speed"], before);
+        Assert.Equal(before, TagIds(await GetJsonAsync("/api/status")));
+    }
+
+    [Fact]
+    public async Task Get_AfterASave_ShowsTheFile_NotTheAppsettingsChannels()
+    {
+        await StartAsync(multiDevice: true);
+
+        await SaveAndWaitAsync(Tree(Channel("Mitsubishi", "Slmp3E", Device("Only", "FX5U", port: 5000, tags: [DTag("Count", "D10")]))));
+
+        var channels = (await GetSettingsAsync()).GetProperty("settings").GetProperty("channels");
+        var channel = Assert.Single(channels.EnumerateArray());
+        Assert.Equal("Only", Assert.Single(channel.GetProperty("devices").EnumerateArray()).GetProperty("name").GetString());
+        Assert.Equal(["Only"], (await GetJsonAsync("/api/status")).GetProperty("devices").EnumerateArray().Select(d => d.GetProperty("name").GetString()));
+    }
+
+    [Fact]
+    public async Task AppsettingsChannels_DoNotLeakIntoTheProposal()
+    {
+        // appsettings has Lab1 (FX5U on port 5000, three tags) at the same index: a proposed FX5U without a Port must
+        // not inherit it, and the leftover tags must not be judged.
+        await StartAsync(multiDevice: true);
+
+        var errors = await ValidateErrorsAsync(Tree(Channel("Mitsubishi", "Slmp3E", Device("Lab1", "FX5U", port: null, tags: [DTag("Count", "D10")]))));
+
+        Assert.Equal(["Edge:Channels:0:Devices:0:Port"], errors.Select(e => e.Path));
+    }
+
+    public static TheoryData<string, string> NodeErrors => new()
+    {
+        { "duplicate-device-name", "Edge:Channels:0:Devices:1:Name" },
+        { "model-of-another-driver", "Edge:Channels:0:Devices:0:Model" },
+        { "bad-s7-address", "Edge:Channels:1:Devices:0:Tags:5:Address" },
+        { "fx3u-writes", "Edge:Channels:0:Devices:0:WritesEnabled" },
+        { "empty-tag-object", "Edge:Channels:0:Devices:0:Tags:1" },
+        { "tags-over-1000-on-a-device", "Edge:Channels:0:Devices:0:Tags" },
+        { "tags-over-5000-in-total", "Edge:Channels:0:Devices:5:Tags" },
+        { "unknown-device-key", "Edge:Channels:0:Devices:0:Color" },
+        { "poll-out-of-range", "Edge:Channels:0:Devices:0:PollIntervalMs" },
+        { "string-without-length", "Edge:Channels:0:Devices:0:Tags:0:Length" },
+        { "channels-twice-in-another-case", "Edge:Channels:0" },
+        { "device-key-twice-in-another-case", "Edge:Channels:0:Devices:0" },
+    };
+
+    [Theory]
+    [MemberData(nameof(NodeErrors))]
+    public async Task InvalidTree_IsRefused_NamingTheNode(string fault, string expectedPath)
+    {
+        await StartAsync();
+        var digest = Digest();
+
+        var proposed = fault switch
+        {
+            "duplicate-device-name" => Tree(Channel("Siemens", "S7", Device("Line", "S7-1200", host: "10.0.0.1"), Device("LINE", "S7-1200", host: "10.0.0.2"))),
+            "model-of-another-driver" => Tree(Channel("Siemens", "S7", Device("Line", "FX5U", port: 5000))),
+            "bad-s7-address" => Tree(
+                Channel("Mitsubishi", "Slmp3E", Device("Press", "FX5U", port: 5000)),
+                Channel("Siemens", "S7", Device("Line", "S7-1200", tags: [.. Enumerable.Range(0, 5).Select(i => DTag($"T{i}", $"DB1.DBW{i * 2}")), DTag("Bad", "D100")]))),
+            "fx3u-writes" => Tree(Channel("Old", "Mc1E", Device("Fx3", "FX3U", port: 5551, writesEnabled: true))),
+            "empty-tag-object" => Tree(Channel("Siemens", "S7", Device("Line", "S7-1200", tags: [DTag("A", "DB1.DBW0"), new JsonObject(), DTag("B", "DB1.DBW2")]))),
+            "tags-over-1000-on-a-device" => Tree(Channel("Siemens", "S7", Device("Line", "S7-1200", tags: ManyTags(1001)))),
+            "tags-over-5000-in-total" => Tree(Channel("Siemens", "S7", [.. Enumerable.Range(0, 6).Select(i => Device($"L{i}", "S7-1200", host: $"10.0.0.{i + 1}", tags: ManyTags(i < 5 ? 1000 : 1)))])),
+            "unknown-device-key" => Tree(Channel("Siemens", "S7", With(Device("Line", "S7-1200"), "Color", "red"))),
+            "poll-out-of-range" => Tree(Channel("Siemens", "S7", With(Device("Line", "S7-1200"), "PollIntervalMs", 5))),
+            "string-without-length" => Tree(Channel("Siemens", "S7", Device("Line", "S7-1200", tags: [DTag("Batch", "DB1.DBB0", dataType: "String")]))),
+            // The binder would merge both spellings, so the counts above could be passed with an empty first list.
+            "channels-twice-in-another-case" => With(Tree(), "channels", new JsonArray(Channel("Siemens", "S7", Device("Line", "S7-1200", tags: ManyTags(1001))))),
+            "device-key-twice-in-another-case" => Tree(Channel("Siemens", "S7", With(Device("Line", "S7-1200", tags: []), "tags", new JsonArray([.. ManyTags(1001)])))),
+            _ => throw new ArgumentOutOfRangeException(nameof(fault)),
+        };
+
+        using var response = await PutAsync(Body(await RevisionAsync(), Password, proposed));
+        var errors = Errors(await ReadJsonAsync(response));
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Contains(expectedPath, errors.Select(e => e.Path));
+        Assert.DoesNotContain(errors, e => e.Path == "Edge:Channels");
+        Assert.All(errors, e => Assert.False(string.IsNullOrWhiteSpace(e.Message)));
+        await Task.Delay(200);
+        Assert.Equal(digest, Digest());
+    }
+
+    [Fact]
+    public async Task ErrorsOnTwoDevices_AreBothListed()
+    {
+        await StartAsync();
+
+        var errors = await ValidateErrorsAsync(Tree(
+            Channel("Siemens", "S7", Device("Line", "S7-1300")),
+            Channel("Mitsubishi", "Slmp3E", Device("Press", "FX5U", port: 5000, tags: [DTag("Ok", "D0"), DTag("Bad", "DB1.DBW0")]))));
+
+        var paths = errors.Select(e => e.Path).ToList();
+        Assert.Contains("Edge:Channels:0:Devices:0:Model", paths);
+        Assert.Contains("Edge:Channels:1:Devices:0:Tags:1:Address", paths);
+        Assert.DoesNotContain("Edge:Channels", paths);
     }
 
     public static TheoryData<string, HttpStatusCode> Refusals => new()
@@ -92,59 +249,35 @@ public sealed class SettingsApiTests : IAsyncDisposable
         { "text-plain-json-param", HttpStatusCode.UnsupportedMediaType },
         { "evil-origin", HttpStatusCode.Forbidden },
         { "cross-site-fetch", HttpStatusCode.Forbidden },
+        { "null-origin", HttpStatusCode.Forbidden },
         { "unknown-top-key", HttpStatusCode.BadRequest },
         { "unknown-settings-key", HttpStatusCode.BadRequest },
-        { "duplicate-tag", HttpStatusCode.BadRequest },
-        { "bad-address", HttpStatusCode.BadRequest },
+        { "schema-1-body", HttpStatusCode.BadRequest },
         { "stale-revision", HttpStatusCode.Conflict },
-        { "writable-true", HttpStatusCode.BadRequest },
-        { "writable-address-changed", HttpStatusCode.BadRequest },
-        { "writable-min-changed", HttpStatusCode.BadRequest },
-        { "writable-max-changed", HttpStatusCode.BadRequest },
-        { "writable-datatype-changed", HttpStatusCode.BadRequest },
-        { "writable-tagid-case", HttpStatusCode.BadRequest },
-        { "host-changed-with-writable", HttpStatusCode.BadRequest },
-        { "port-changed-with-writable", HttpStatusCode.BadRequest },
-        { "protocol-changed-with-writable", HttpStatusCode.BadRequest },
-        { "rack-changed-with-writable", HttpStatusCode.BadRequest },
-        { "null-origin", HttpStatusCode.Forbidden },
-        { "empty-tag-object", HttpStatusCode.BadRequest },
     };
 
     [Theory]
     [MemberData(nameof(Refusals))]
     public async Task Refusal_HasItsStatus_AndLeavesTheFileUnchanged(string refusal, HttpStatusCode expected)
     {
-        await StartAsync(withWritable: true);
+        await StartAsync();
         var digest = Digest();
         var revision = await RevisionAsync();
-        var keep = WritableTag();
+        var good = OneDevice();
 
         var (body, contentType, headers) = refusal switch
         {
-            "wrong-password" => (Body(revision, "not-the-password", Proposed(tags: [keep])), "application/json", NoHeaders),
-            "foreign-host" => (Body(revision, Password, Proposed(tags: [keep])), "application/json", new() { ["Host"] = "evil.example" }),
-            "text-plain" => (Body(revision, Password, Proposed(tags: [keep])), "text/plain", NoHeaders),
-            "text-plain-json-param" => (Body(revision, Password, Proposed(tags: [keep])), "text/plain; x=application/json", NoHeaders),
-            "evil-origin" => (Body(revision, Password, Proposed(tags: [keep])), "application/json", new() { ["Origin"] = "http://evil.example" }),
-            "cross-site-fetch" => (Body(revision, Password, Proposed(tags: [keep])), "application/json", new() { ["Sec-Fetch-Site"] = "cross-site" }),
-            "unknown-top-key" => (WithTopKey(Body(revision, Password, Proposed(tags: [keep])), "extra"), "application/json", NoHeaders),
-            "unknown-settings-key" => (Body(revision, Password, WithKey(Proposed(tags: [keep]), "Mqtt", new JsonObject { ["Host"] = "x" })), "application/json", NoHeaders),
-            "duplicate-tag" => (Body(revision, Password, Proposed(tags: [keep, Tag("A.Dup", "DB5.DBW0"), Tag("a.dup", "DB5.DBW2")])), "application/json", NoHeaders),
-            "bad-address" => (Body(revision, Password, Proposed(tags: [keep, Tag("A.Bad", "D100")])), "application/json", NoHeaders),
-            "stale-revision" => (Body("0000", Password, Proposed(tags: [keep])), "application/json", NoHeaders),
-            "writable-true" => (Body(revision, Password, Proposed(tags: [keep, Tag("A.New", "DB5.DBW0", writable: true)])), "application/json", NoHeaders),
-            "writable-address-changed" => (Body(revision, Password, Proposed(tags: [WritableTag(address: "DB1.DBW10")])), "application/json", NoHeaders),
-            "writable-min-changed" => (Body(revision, Password, Proposed(tags: [WritableTag(min: 1)])), "application/json", NoHeaders),
-            "writable-max-changed" => (Body(revision, Password, Proposed(tags: [WritableTag(max: 2000)])), "application/json", NoHeaders),
-            "writable-datatype-changed" => (Body(revision, Password, Proposed(tags: [WritableTag(dataType: "Word")])), "application/json", NoHeaders),
-            "writable-tagid-case" => (Body(revision, Password, Proposed(tags: [WritableTag(tagId: "line1.setpoint")])), "application/json", NoHeaders),
-            "host-changed-with-writable" => (Body(revision, Password, Proposed(host: "10.0.0.9", tags: [keep])), "application/json", NoHeaders),
-            "port-changed-with-writable" => (Body(revision, Password, Proposed(port: 1102, tags: [keep])), "application/json", NoHeaders),
-            "protocol-changed-with-writable" => (Body(revision, Password, Proposed(protocol: "Slmp", port: 5000, timeoutMs: 1000, tags: [keep])), "application/json", NoHeaders),
-            "rack-changed-with-writable" => (Body(revision, Password, WithPlcKey(Proposed(tags: [keep]), "Rack", 1)), "application/json", NoHeaders),
-            "null-origin" => (Body(revision, Password, Proposed(tags: [keep])), "application/json", new() { ["Origin"] = "null" }),
-            "empty-tag-object" => (Body(revision, Password, Proposed(tags: [keep, new JsonObject()])), "application/json", NoHeaders),
+            "wrong-password" => (Body(revision, "not-the-password", good), "application/json", NoHeaders),
+            "foreign-host" => (Body(revision, Password, good), "application/json", new() { ["Host"] = "evil.example" }),
+            "text-plain" => (Body(revision, Password, good), "text/plain", NoHeaders),
+            "text-plain-json-param" => (Body(revision, Password, good), "text/plain; x=application/json", NoHeaders),
+            "evil-origin" => (Body(revision, Password, good), "application/json", new() { ["Origin"] = "http://evil.example" }),
+            "cross-site-fetch" => (Body(revision, Password, good), "application/json", new() { ["Sec-Fetch-Site"] = "cross-site" }),
+            "null-origin" => (Body(revision, Password, good), "application/json", new() { ["Origin"] = "null" }),
+            "unknown-top-key" => (WithTopKey(Body(revision, Password, good), "extra"), "application/json", NoHeaders),
+            "unknown-settings-key" => (Body(revision, Password, With(OneDevice(), "Mqtt", new JsonObject { ["Host"] = "x" })), "application/json", NoHeaders),
+            "schema-1-body" => (Body(revision, Password, new JsonObject { ["Plc"] = new JsonObject { ["Host"] = "127.0.0.1" } }), "application/json", NoHeaders),
+            "stale-revision" => (Body("0000", Password, good), "application/json", NoHeaders),
             _ => throw new ArgumentOutOfRangeException(nameof(refusal)),
         };
 
@@ -160,91 +293,66 @@ public sealed class SettingsApiTests : IAsyncDisposable
     [Fact]
     public async Task ErrorResponses_NameKeyPaths_NotTheSubmittedValues()
     {
-        await StartAsync(withWritable: true);
-        var revision = await RevisionAsync();
+        await StartAsync();
 
-        // A read-only tag on the writable tag's address (overlap), and an SLMP address out of range: validator text
-        // for both names the address, the response must not.
-        using var overlap = await PutAsync(Body(revision, Password, Proposed(tags: [WritableTag(), Tag("X.Shadow", "DB1.DBW4")])));
-        using var range = await SendAsync(HttpMethod.Post, "/api/settings/validate",
-            Body(revision, null, Proposed(protocol: "Slmp", port: 5000, timeoutMs: 1000, tags: [Tag("F.Far", "D99999")])), "application/json", NoHeaders);
+        var text = await (await SendAsync(HttpMethod.Post, "/api/settings/validate", Body(await RevisionAsync(), null, Tree(
+            Channel("Siemens", "S7",
+                Device("Line", "S7-1200", host: "10.9.8.7", tags: [DTag("Far", "DB1.DBX9.9", dataType: "Bool")]),
+                Device("Copy", "S7-1200", host: "10.9.8.7")))), "application/json", NoHeaders)).Content.ReadAsStringAsync();
 
-        var overlapText = await overlap.Content.ReadAsStringAsync();
-        var rangeText = await range.Content.ReadAsStringAsync();
-        Assert.Equal(HttpStatusCode.BadRequest, overlap.StatusCode);
-        Assert.DoesNotContain("DB1.DBW4", overlapText, StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain("X.Shadow", overlapText);
-        Assert.Contains("\"Edge:Tags:", overlapText);
-        Assert.DoesNotContain("D99999", rangeText);
-        Assert.Contains("Edge:Tags", rangeText);
-
-        // A value that looks like a key: the binder names the value first, the path must still be the real key.
-        using var typed = await SendAsync(HttpMethod.Post, "/api/settings/validate",
-            Body(revision, null, Proposed(tags: [WritableTag(), Tag("A.Odd", "DB5.DBW0", dataType: "Edge:Fake:Key")])), "application/json", NoHeaders);
-        var typedErrors = (await ReadJsonAsync(typed)).GetProperty("errors");
-        Assert.StartsWith("Edge:Tags", typedErrors[0].GetProperty("path").GetString());
-        Assert.DoesNotContain("Edge:Fake:Key", typedErrors.GetRawText());
+        // Both values are refused, so their absence proves the response hides them.
+        var paths = Errors(JsonDocument.Parse(text).RootElement).Select(e => e.Path).ToList();
+        Assert.Contains("Edge:Channels:0:Devices:0:Tags:0:Address", paths);
+        Assert.Contains("Edge:Channels:0:Devices:1:Host", paths);
+        Assert.DoesNotContain("10.9.8.7", text);
+        Assert.DoesNotContain("DB1.DBX9.9", text);
     }
 
     [Fact]
-    public async Task SlmpWithCommandsEnabled_IsSaved()
-    {
-        await StartAsync(commandsEnabled: true);
-
-        var applyId = await SaveAndWaitAsync(Proposed(protocol: "Slmp", port: 5000, timeoutMs: 1000, tags: [Tag("F.D100", "D100")]));
-
-        Assert.NotEmpty(applyId);
-        Assert.Equal("Slmp", (await GetSettingsAsync()).GetProperty("settings").GetProperty("plc").GetProperty("protocol").GetString());
-    }
-
-    [Fact]
-    public async Task BodyOverOneMegabyte_Is413()
+    public async Task WritePermissions_AreSavedAsSent()
     {
         await StartAsync();
 
-        using var response = await PutAsync(new string(' ', SettingsService.MaxBodyBytes + 10) + "{}");
+        await SaveAndWaitAsync(Tree(Channel("Siemens", "S7",
+            Device("Line", "S7-1200", writesEnabled: true, tags: [DTag("Setpoint", "DB1.DBW4", writable: true, min: 0, max: 1500)]))));
 
-        Assert.Equal(HttpStatusCode.RequestEntityTooLarge, response.StatusCode);
+        var device = (await GetSettingsAsync()).GetProperty("settings").GetProperty("channels")[0].GetProperty("devices")[0];
+        Assert.True(device.GetProperty("writesEnabled").GetBoolean());
+        Assert.True(device.GetProperty("tags")[0].GetProperty("writable").GetBoolean());
+
+        // The save carried what it changed against the running Edge (one PLC, writes off), logged once applied.
+        var logged = _logs.Entries.Where(e => e.Contains("Write permission changed", StringComparison.Ordinal)).ToList();
+        Assert.Equal(2, logged.Count);
+        Assert.Contains(logged, e => e.Contains("device Line off -> on"));
+        Assert.Contains(logged, e => e.Contains("tag Line.Setpoint off -> on"));
     }
 
     [Fact]
-    public async Task Save_OnAMultiDeviceFile_IsRefused_AndTheFileIsUnchanged()
+    public async Task ValidPut_Is202_AndTheNewHostReportsThatApplyAsApplied()
     {
-        // The single-PLC page would write schema 1 back: the device prefix of every TagId and each device's writes
-        // switch would be lost. Called directly, so the refusal is checked without a running host.
-        Directory.CreateDirectory(Path.GetDirectoryName(SettingsPath())!);
-        File.WriteAllText(SettingsPath(), """
-            {"SchemaVersion":2,"Edge":{"Channels":[{"Name":"S7","Driver":"S7","Devices":[
-              {"Name":"Line1","Model":"S7-1200","Host":"10.0.0.1","Tags":[{"Name":"Temp","Address":"DB1.DBD0","DataType":"Real"}]}]}]}}
-            """);
-        var digest = Digest();
-        var file = EdgeSettingsFile.Read(SettingsPath());
-        var service = new SettingsService(
-            new ConfigurationBuilder().Build(),
-            file,
-            Microsoft.Extensions.Options.Options.Create(new Drivers.PlcTagCatalogOptions()),
-            new Drivers.PlcDeviceRegistry(
-                new Configuration.EdgeDeviceSet([], MigratedFromV1: false),
-                new FakeDriverFactory(_ => new FakePlcDriver()),
-                new ServiceCollection().BuildServiceProvider(),
-                Microsoft.Extensions.Logging.Abstractions.NullLogger<Drivers.PlcDeviceRegistry>.Instance),
-            Microsoft.Extensions.Options.Options.Create(new Drivers.PlcProtocolOptions()),
-            new ServiceCollection().BuildServiceProvider(),
-            Microsoft.Extensions.Options.Options.Create(new Polling.PollOptions()),
-            new SettingsPassword(TimeProvider.System, Microsoft.Extensions.Logging.Abstractions.NullLogger<SettingsPassword>.Instance));
-        var context = new Microsoft.AspNetCore.Http.DefaultHttpContext();
-        context.Request.ContentType = "application/json";
-        context.Request.Body = new MemoryStream(Encoding.UTF8.GetBytes(Body(file.Revision, Password, Proposed(tags: [Tag("New.One", "DB5.DBW0")]))));
-        context.Response.Body = new MemoryStream();
+        await StartAsync();
 
-        await service.SaveAsync(context, _port);
+        using var response = await PutAsync(Body(await RevisionAsync(), Password, OneDevice(pollIntervalMs: 500)));
+        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+        var applyId = (await ReadJsonAsync(response)).GetProperty("applyId").GetString()!;
 
-        Assert.Equal((int)HttpStatusCode.Conflict, context.Response.StatusCode);
-        context.Response.Body.Position = 0;
-        var reply = JsonDocument.Parse(context.Response.Body).RootElement;
-        Assert.Equal("multi-device-file", reply.GetProperty("error").GetString());
-        Assert.Contains("multi-device configuration", reply.GetProperty("message").GetString());
-        Assert.Equal(digest, Digest());
+        var apply = await WaitForApplyAsync(applyId);
+        Assert.Equal("applied", apply.GetProperty("state").GetString());
+        Assert.Equal(Revision(File.ReadAllBytes(SettingsPath())), apply.GetProperty("revision").GetString());
+        Assert.Equal(500, (await GetJsonAsync("/api/status")).GetProperty("pollIntervalMs").GetInt32());
+    }
+
+    [Fact]
+    public async Task BodyOverFourMegabytes_Is413_AndOneOfTwoMegabytesIsRead()
+    {
+        await StartAsync();
+
+        using var tooLarge = await PutAsync(new string(' ', SettingsService.MaxBodyBytes + 10) + "{}");
+        using var large = await PutAsync(new string(' ', 2 * 1024 * 1024) + "{}");
+
+        Assert.Equal(HttpStatusCode.RequestEntityTooLarge, tooLarge.StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, large.StatusCode);
+        Assert.Equal(4 * 1024 * 1024, SettingsService.MaxBodyBytes);
     }
 
     [Fact]
@@ -252,7 +360,7 @@ public sealed class SettingsApiTests : IAsyncDisposable
     {
         await StartAsync(withPassword: false);
 
-        using var response = await PutAsync(Body(await RevisionAsync(), Password, Proposed(tags: [Tag("New.One", "DB5.DBW0")])));
+        using var response = await PutAsync(Body(await RevisionAsync(), Password, OneDevice()));
 
         Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
         Assert.False(File.Exists(SettingsPath()));
@@ -266,58 +374,23 @@ public sealed class SettingsApiTests : IAsyncDisposable
 
         for (var i = 0; i < 5; i++)
         {
-            using var wrong = await PutAsync(Body(revision, "wrong-" + i, Proposed(tags: [Tag("New.One", "DB5.DBW0")])));
+            using var wrong = await PutAsync(Body(revision, "wrong-" + i, OneDevice()));
             Assert.Equal(HttpStatusCode.Unauthorized, wrong.StatusCode);
         }
 
-        using var locked = await PutAsync(Body(revision, Password, Proposed(tags: [Tag("New.One", "DB5.DBW0")])));
+        using var locked = await PutAsync(Body(revision, Password, OneDevice()));
         Assert.Equal(HttpStatusCode.TooManyRequests, locked.StatusCode);
         Assert.False(File.Exists(SettingsPath()));
     }
 
     [Fact]
-    public async Task DeletingAWritableTag_Is202_AndThenThePlcMayChange()
-    {
-        await StartAsync(withWritable: true);
-
-        await SaveAndWaitAsync(Proposed(tags: [Tag("A.One", "DB5.DBW0")]));
-        Assert.Empty((await GetSettingsAsync()).GetProperty("writableTags").EnumerateArray());
-
-        await SaveAndWaitAsync(Proposed(host: "10.0.0.9", tags: [Tag("A.One", "DB5.DBW0")]));
-        Assert.Equal("10.0.0.9", (await GetSettingsAsync()).GetProperty("settings").GetProperty("plc").GetProperty("host").GetString());
-    }
-
-    [Fact]
-    public async Task KeptWritableTag_SentBackAsGetReturnedIt_StaysWritable()
-    {
-        await StartAsync(withWritable: true);
-
-        // Exactly what the page does: send the writable tag back with Writable=false and its Min/Max; edit another tag.
-        var current = (await GetSettingsAsync()).GetProperty("settings").GetProperty("tags");
-        var sentBack = current.EnumerateArray().Select(t => new JsonObject
-        {
-            ["TagId"] = t.GetProperty("tagId").GetString(),
-            ["Address"] = t.GetProperty("address").GetString(),
-            ["DataType"] = t.GetProperty("dataType").GetString(),
-            ["Writable"] = false,
-            ["Min"] = t.GetProperty("min").ValueKind == JsonValueKind.Null ? null : t.GetProperty("min").GetDecimal(),
-            ["Max"] = t.GetProperty("max").ValueKind == JsonValueKind.Null ? null : t.GetProperty("max").GetDecimal(),
-        }).ToList();
-        sentBack[1]["Address"] = "DB2.DBW0";
-
-        await SaveAndWaitAsync(Proposed(tags: [.. sentBack]));
-
-        var after = await GetSettingsAsync();
-        Assert.Equal(["Line1.Setpoint"], after.GetProperty("writableTags").EnumerateArray().Select(t => t.GetString()));
-        Assert.Equal("DB2.DBW0", after.GetProperty("settings").GetProperty("tags")[1].GetProperty("address").GetString());
-    }
-
-    [Fact]
     public async Task Validate_ReturnsTheSameErrorsAsPut_AndWritesNothing()
     {
-        await StartAsync(withWritable: true);
+        await StartAsync();
         var revision = await RevisionAsync();
-        var proposed = Proposed(host: "10.0.0.9", tags: [WritableTag(address: "DB1.DBW10"), Tag("A.Bad", "D100")]);
+        var proposed = Tree(Channel("Siemens", "S7",
+            Device("Line", "S7-1200", tags: [DTag("Bad", "D100")]),
+            Device("Line", "S7-1200", host: "10.0.0.2")));
 
         using var validate = await SendAsync(HttpMethod.Post, "/api/settings/validate", Body(revision, null, proposed), "application/json", NoHeaders);
         using var put = await PutAsync(Body(revision, Password, proposed));
@@ -328,10 +401,7 @@ public sealed class SettingsApiTests : IAsyncDisposable
         Assert.False(validated.GetProperty("ok").GetBoolean());
         Assert.Equal(HttpStatusCode.BadRequest, put.StatusCode);
         Assert.Equal(validated.GetProperty("errors").GetRawText(), refused.GetProperty("errors").GetRawText());
-        // Both the writable-rule error (the changed writable tag) and the validator error (D100 is not an S7 address).
-        var paths = validated.GetProperty("errors").EnumerateArray().Select(e => e.GetProperty("path").GetString()).ToList();
-        Assert.Contains("Edge:Tags:0", paths);
-        Assert.True(paths.Count >= 2, string.Join(", ", paths));
+        Assert.True(Errors(validated).Count >= 2);
         Assert.False(File.Exists(SettingsPath()));
     }
 
@@ -341,8 +411,8 @@ public sealed class SettingsApiTests : IAsyncDisposable
         await StartAsync();
         var revision = await RevisionAsync();
 
-        var first = PutAsync(Body(revision, Password, Proposed(tags: [Tag("New.One", "DB5.DBW0")])));
-        var second = PutAsync(Body(revision, Password, Proposed(tags: [Tag("New.Two", "DB5.DBW0")])));
+        var first = PutAsync(Body(revision, Password, OneDevice()));
+        var second = PutAsync(Body(revision, Password, OneDevice(pollIntervalMs: 2000)));
         using var a = await first;
         using var b = await second;
 
@@ -356,7 +426,7 @@ public sealed class SettingsApiTests : IAsyncDisposable
     {
         await StartAsync();
         var revision = await RevisionAsync();
-        var proposed = Proposed(tags: [Tag("New.One", "DB5.DBW0")]);
+        var proposed = OneDevice();
 
         for (var i = 0; i < 4; i++)
         {
@@ -386,9 +456,9 @@ public sealed class SettingsApiTests : IAsyncDisposable
 
         foreach (var (password, proposed) in new[]
         {
-            (Attempt, Proposed(tags: [Tag("New.One", "DB5.DBW0")])),
-            (Attempt, Proposed(tags: [Tag("A.Bad", "D100")])),
-            (Password, Proposed(tags: [Tag("New.One", "DB5.DBW0")])),
+            (Attempt, OneDevice()),
+            (Attempt, Tree(Channel("Siemens", "S7", Device("Line", "S7-1200", tags: [DTag("Bad", "D100")])))),
+            (Password, OneDevice()),
         })
         {
             using var response = await PutAsync(Body(revision, password, proposed));
@@ -410,32 +480,31 @@ public sealed class SettingsApiTests : IAsyncDisposable
     {
         // A right password resets the count, so the rebuild in between is requested directly, not through a save.
         await StartAsync();
-        var proposed = Proposed(tags: [Tag("New.One", "DB5.DBW0")]);
         for (var i = 0; i < 4; i++)
         {
-            using var wrong = await PutAsync(Body(await RevisionAsync(), "wrong-" + i, proposed));
+            using var wrong = await PutAsync(Body(await RevisionAsync(), "wrong-" + i, OneDevice()));
             Assert.Equal(HttpStatusCode.Unauthorized, wrong.StatusCode);
         }
 
         var restarter = Restarter();
         Assert.True(restarter.TryRequest(Encoding.UTF8.GetBytes(
-            """{"SchemaVersion":1,"Edge":{"Plc":{"Host":"127.0.0.1"},"Tags":[{"TagId":"B.Two","Address":"DB1.DBW2","DataType":"Int"}]}}"""), out var applyId));
+            """{"SchemaVersion":2,"Edge":{"Channels":[{"Name":"S7","Driver":"S7","Devices":[{"Name":"B","Model":"S7-1200","Host":"127.0.0.1","Tags":[{"Name":"Two","Address":"DB1.DBW2","DataType":"Int"}]}]}]}}"""), out var applyId));
         restarter.Release(applyId);
         Assert.Equal("applied", (await WaitForApplyAsync(applyId)).GetProperty("state").GetString());
 
         var revision = await RevisionAsync();
-        using (var fifth = await PutAsync(Body(revision, "wrong-4", proposed)))
+        using (var fifth = await PutAsync(Body(revision, "wrong-4", OneDevice())))
         {
             Assert.Equal(HttpStatusCode.Unauthorized, fifth.StatusCode);
         }
 
-        using var locked = await PutAsync(Body(revision, Password, proposed));
+        using var locked = await PutAsync(Body(revision, Password, OneDevice()));
         Assert.Equal(HttpStatusCode.TooManyRequests, locked.StatusCode);
     }
 
     private static readonly Dictionary<string, string> NoHeaders = [];
 
-    private async Task StartAsync(bool withPassword = true, bool withWritable = false, bool commandsEnabled = false)
+    private async Task StartAsync(bool withPassword = true, bool multiDevice = false, Dictionary<string, string?>? extra = null)
     {
         if (withPassword)
         {
@@ -445,39 +514,58 @@ public sealed class SettingsApiTests : IAsyncDisposable
         var settings = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase)
         {
             ["Edge:EdgeId"] = "settings-api-test",
-            ["Edge:Plc:Host"] = "127.0.0.1",
-            ["Edge:Plc:Port"] = _plcPort.ToString(System.Globalization.CultureInfo.InvariantCulture),
-            ["Edge:Plc:TimeoutMs"] = "500",
-            ["Edge:Tags:0:TagId"] = "Line1.Speed",
-            ["Edge:Tags:0:Address"] = "DB1.DBW2",
-            ["Edge:Tags:0:DataType"] = "Int",
             ["Edge:Buffer:Path"] = "data/edge.db",
-            ["Edge:Poll:IntervalMs"] = "1000",
             ["Edge:Mqtt:Host"] = "127.0.0.1",
-            ["Edge:Mqtt:Port"] = ClosedPort().ToString(System.Globalization.CultureInfo.InvariantCulture),
+            ["Edge:Mqtt:Port"] = ClosedPort().ToString(CultureInfo.InvariantCulture),
             ["Edge:Mqtt:Username"] = "settings-api-test",
             ["Edge:Mqtt:Password"] = "test-only-password",
-            ["Edge:Commands:Enabled"] = commandsEnabled ? "true" : "false",
+            ["Edge:Commands:Enabled"] = "false",
             ["Edge:Monitor:Enabled"] = "true",
-            ["Edge:Monitor:Port"] = _port.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            ["Edge:Monitor:Port"] = _port.ToString(CultureInfo.InvariantCulture),
         };
-        if (withWritable)
+        if (multiDevice)
         {
-            // Line1.Setpoint writable 0..1500, as an administrator would configure it.
-            settings["Edge:Tags:0:TagId"] = "Line1.Setpoint";
-            settings["Edge:Tags:0:Address"] = "DB1.DBW4";
-            settings["Edge:Tags:0:Writable"] = "true";
-            settings["Edge:Tags:0:Min"] = "0";
-            settings["Edge:Tags:0:Max"] = "1500";
-            settings["Edge:Tags:1:TagId"] = "Line1.Speed";
-            settings["Edge:Tags:1:Address"] = "DB1.DBW2";
-            settings["Edge:Tags:1:DataType"] = "Int";
+            // As in lab/multi: the channels come from appsettings.
+            settings["Edge:Channels:0:Name"] = "Mitsubishi";
+            settings["Edge:Channels:0:Driver"] = "Slmp3E";
+            settings["Edge:Channels:0:Devices:0:Name"] = "Lab1";
+            settings["Edge:Channels:0:Devices:0:Model"] = "FX5U";
+            settings["Edge:Channels:0:Devices:0:Host"] = "127.0.0.1";
+            settings["Edge:Channels:0:Devices:0:Port"] = "5000";
+            for (var i = 0; i < 3; i++)
+            {
+                settings[$"Edge:Channels:0:Devices:0:Tags:{i}:Name"] = $"Old{i}";
+                settings[$"Edge:Channels:0:Devices:0:Tags:{i}:Address"] = $"D{200 + i}";
+                settings[$"Edge:Channels:0:Devices:0:Tags:{i}:DataType"] = "Int";
+            }
+
+            settings["Edge:Channels:1:Name"] = "Siemens";
+            settings["Edge:Channels:1:Driver"] = "S7";
+            settings["Edge:Channels:1:Devices:0:Name"] = "Lab2";
+            settings["Edge:Channels:1:Devices:0:Model"] = "S7-1200";
+            settings["Edge:Channels:1:Devices:0:Host"] = "127.0.0.2";
+        }
+        else
+        {
+            settings["Edge:Plc:Host"] = "127.0.0.1";
+            settings["Edge:Plc:Port"] = _plcPort.ToString(CultureInfo.InvariantCulture);
+            settings["Edge:Plc:TimeoutMs"] = "500";
+            settings["Edge:Poll:IntervalMs"] = "1000";
+            settings["Edge:Tags:0:TagId"] = "Line1.Speed";
+            settings["Edge:Tags:0:Address"] = "DB1.DBW2";
+            settings["Edge:Tags:0:DataType"] = "Int";
+        }
+
+        foreach (var (key, value) in extra ?? [])
+        {
+            settings[key] = value;
         }
 
         var builder = Host.CreateEmptyApplicationBuilder(new HostApplicationBuilderSettings { ContentRootPath = _contentRoot });
         builder.Configuration.AddInMemoryCollection(settings);
         builder.Logging.AddProvider(_logs);
-        builder.Services.AddEdgeSupervisor();
+        builder.Services.AddEdgeSupervisor(options => options.ConfigureInner = services =>
+            services.Replace(ServiceDescriptor.Singleton<IPlcDriverFactory>(new FakeDriverFactory(_ => new FakePlcDriver()))));
         _outer = builder.Build();
         await _outer.StartAsync();
     }
@@ -487,11 +575,24 @@ public sealed class SettingsApiTests : IAsyncDisposable
     private async Task<string> SaveAndWaitAsync(JsonObject proposed)
     {
         using var response = await PutAsync(Body(await RevisionAsync(), Password, proposed));
-        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
-        var applyId = (await ReadJsonAsync(response)).GetProperty("applyId").GetString()!;
+        var text = await response.Content.ReadAsStringAsync();
+        Assert.True(response.StatusCode == HttpStatusCode.Accepted, text);
+        var applyId = JsonDocument.Parse(text).RootElement.GetProperty("applyId").GetString()!;
         Assert.Equal("applied", (await WaitForApplyAsync(applyId)).GetProperty("state").GetString());
         return applyId;
     }
+
+    private async Task<List<(string Path, string Message)>> ValidateErrorsAsync(JsonObject proposed)
+    {
+        using var response = await SendAsync(HttpMethod.Post, "/api/settings/validate", Body(await RevisionAsync(), null, proposed), "application/json", NoHeaders);
+        return Errors(await ReadJsonAsync(response));
+    }
+
+    private static List<(string Path, string Message)> Errors(JsonElement reply) =>
+        [.. reply.GetProperty("errors").EnumerateArray().Select(e => (e.GetProperty("path").GetString()!, e.GetProperty("message").GetString()!))];
+
+    private static List<string> TagIds(JsonElement status) =>
+        [.. status.GetProperty("tags").EnumerateArray().Select(t => t.GetProperty("tagId").GetString()!).Order(StringComparer.Ordinal)];
 
     private async Task<JsonElement> WaitForApplyAsync(string applyId)
     {
@@ -575,51 +676,70 @@ public sealed class SettingsApiTests : IAsyncDisposable
         return node.ToJsonString();
     }
 
-    private static JsonObject WithPlcKey(JsonObject settings, string key, JsonNode value)
+    private static JsonObject With(JsonObject node, string key, JsonNode value)
     {
-        settings["Plc"]![key] = value;
-        return settings;
+        node[key] = value;
+        return node;
     }
 
-    private static JsonObject WithKey(JsonObject settings, string key, JsonNode value)
-    {
-        settings[key] = value;
-        return settings;
-    }
+    private JsonObject OneDevice(int pollIntervalMs = 1000) =>
+        Tree(Channel("Siemens", "S7", With(Device("Line", "S7-1200", tags: [DTag("Speed", "DB1.DBW2")]), "PollIntervalMs", pollIntervalMs)));
 
-    /// <summary>Proposed settings; the PLC defaults to the one running (same host, port and timeout).</summary>
-    private JsonObject Proposed(
-        JsonObject[] tags, string protocol = "S7", string host = "127.0.0.1", int? port = null, int timeoutMs = 500, int intervalMs = 1000)
-    {
-        var plc = new JsonObject { ["Protocol"] = protocol, ["Host"] = host, ["TimeoutMs"] = timeoutMs, ["Port"] = port ?? _plcPort };
+    private static JsonObject TwoByTwo() => Tree(
+        Channel("Siemens", "S7",
+            Device("S7A", "S7-1200", host: "10.0.0.1", tags: [DTag("Speed", "DB1.DBW2")]),
+            Device("S7B", "S7-1200", host: "10.0.0.2", tags: [DTag("Temp", "DB1.DBD4", dataType: "Real")])),
+        Channel("Mitsubishi", "Slmp3E",
+            Device("Fx5uA", "FX5U", host: "10.0.0.3", port: 5000, tags: [DTag("Count", "D100")]),
+            Device("Fx5uB", "FX5U", host: "10.0.0.4", port: 5000, tags: [DTag("Run", "M0", dataType: "Bool")])));
 
-        return new JsonObject
+    private static JsonObject Tree(params JsonObject[] channels) => new() { ["Channels"] = new JsonArray([.. channels]) };
+
+    private static JsonObject Channel(string name, string driver, params JsonObject[] devices) => new()
+    {
+        ["Name"] = name,
+        ["Driver"] = driver,
+        ["Devices"] = new JsonArray([.. devices]),
+    };
+
+    private static JsonObject Device(
+        string name, string model, string host = "127.0.0.1", int? port = null, bool writesEnabled = false, JsonObject[]? tags = null)
+    {
+        var device = new JsonObject
         {
-            ["Plc"] = plc,
-            ["Poll"] = new JsonObject { ["IntervalMs"] = intervalMs },
-            ["Tags"] = new JsonArray([.. tags]),
+            ["Name"] = name,
+            ["Model"] = model,
+            ["Host"] = host,
+            ["TimeoutMs"] = 1000,
+            ["WritesEnabled"] = writesEnabled,
+            ["Tags"] = new JsonArray([.. tags ?? [DTag("Speed", model == "S7-1200" ? "DB1.DBW2" : "D0")]]),
         };
+        if (port is { } value)
+        {
+            device["Port"] = value;
+        }
+
+        return device;
     }
 
-    private static JsonObject Tag(string tagId, string address, string dataType = "Int", bool writable = false) => new()
+    private static JsonObject DTag(string name, string address, string dataType = "Int", bool writable = false, decimal? min = null, decimal? max = null)
     {
-        ["TagId"] = tagId,
-        ["Address"] = address,
-        ["DataType"] = dataType,
-        ["Writable"] = writable,
-    };
+        var tag = new JsonObject { ["Name"] = name, ["Address"] = address, ["DataType"] = dataType, ["Writable"] = writable };
+        if (min is { } low)
+        {
+            tag["Min"] = low;
+        }
 
-    /// <summary>The configured writable tag, sent back as the page would (Writable=false), optionally altered.</summary>
-    private static JsonObject WritableTag(
-        string tagId = "Line1.Setpoint", string address = "DB1.DBW4", string dataType = "Int", decimal min = 0, decimal max = 1500) => new()
-    {
-        ["TagId"] = tagId,
-        ["Address"] = address,
-        ["DataType"] = dataType,
-        ["Writable"] = false,
-        ["Min"] = min,
-        ["Max"] = max,
-    };
+        if (max is { } high)
+        {
+            tag["Max"] = high;
+        }
+
+        return tag;
+    }
+
+    private static JsonObject[] ManyTags(int count) =>
+        [.. Enumerable.Range(0, count).Select(i => DTag($"T{i}", $"DB1.DBW{i * 2}"))];
 
     private string SettingsPath() => Path.Combine(_contentRoot, "data", "edge.settings.json");
 

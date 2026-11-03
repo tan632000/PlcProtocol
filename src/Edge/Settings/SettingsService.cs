@@ -1,11 +1,8 @@
-using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
-using IndustrialIot.Edge.Drivers;
-using IndustrialIot.Edge.Drivers.Models;
-using IndustrialIot.Edge.Drivers.Slmp;
-using IndustrialIot.Edge.Polling;
+using IndustrialIot.Edge.Commands;
+using IndustrialIot.Edge.Configuration;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Options;
 using Microsoft.Net.Http.Headers;
@@ -14,33 +11,31 @@ namespace IndustrialIot.Edge.Settings;
 
 /// <summary>
 /// The settings API of the loopback monitor: <c>GET /api/settings</c>, <c>POST /api/settings/validate</c> and
-/// <c>PUT /api/settings</c>. A save is checked in this order and refused at the first failing step, before anything
-/// is written: request guard (cross-site, media type, size), a multi-device file, shape, the Edge's own startup validators, the writable
-/// rule, revision, password, apply already running. Only then is the apply queued; the supervisor rebuilds the agent
-/// after the response has been sent. Errors give key paths and fixed text, never the submitted values.
+/// <c>PUT /api/settings</c>, on the Channel → Device → Tag tree of a schema-2 settings file. A save is checked in this
+/// order and refused at the first failing step, before anything is written: request guard (cross-site, media type,
+/// size), the tree's shape and limits, the validator, each device's own checks, the Edge's startup registration,
+/// revision, password, apply already running. Only then is the apply queued; the supervisor rebuilds the agent after
+/// the response has been sent. Errors give the node's key path and a fixed text, never the submitted values.
 /// </summary>
 public sealed partial class SettingsService(
     IConfiguration configuration,
     EdgeSettingsFile file,
-    IOptions<PlcTagCatalogOptions> tags,
-    PlcDeviceRegistry registry,
-    IOptions<PlcProtocolOptions> protocol,
-    IServiceProvider services,
-    IOptions<PollOptions> poll,
+    EdgeDeviceSet devices,
+    IOptions<CommandsOptions> commands,
     SettingsPassword password,
     EdgeRestarter? restarter = null)
 {
-    public const int MaxBodyBytes = 1024 * 1024;
-    public const int MaxTags = 1000;
+    /// <summary>The settings routes' body limit: 5000 tags with descriptions fit.</summary>
+    public const int MaxBodyBytes = 4 * 1024 * 1024;
+
+    /// <summary>The body limit of the other routes that share the guard.</summary>
+    public const int DefaultMaxBodyBytes = 1024 * 1024;
 
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
     private static readonly string[] TopLevelKeys = ["revision", "password", "settings"];
 
-    private const string MultiDeviceMessage =
-        "This Edge uses the multi-device configuration; edit the file or use the new settings page.";
-
     private const string ShapeMessage =
-        "Not allowed here: only Plc (Protocol, Host, Port, Rack, Slot, CpuType, TimeoutMs), Poll (IntervalMs) and Tags (TagId, Address, DataType, Writable, Min, Max), each a single value.";
+        "Not allowed here: only the keys of a channel (Name, Driver, Devices), a device or a tag, each a single value.";
 
     public async Task GetAsync(HttpContext context)
     {
@@ -49,8 +44,10 @@ public sealed partial class SettingsService(
             {
                 revision = file.Revision,
                 source = file.Exists ? "file" : "defaults",
-                settings = CurrentSettings(),
-                writableTags = tags.Value.Tags.Where(t => t.Writable).Select(t => t.TagId).ToArray(),
+                settings = new { Channels = SettingsTree.Channels(devices) },
+                models = SettingsTree.Models(),
+                warnings = SettingsTree.Warnings(devices),
+                commandsEnabled = commands.Value.Enabled,
                 passwordSet = File.Exists(SettingsPassword.PathFor(file.Path)),
             },
             Json).ConfigureAwait(false);
@@ -58,7 +55,7 @@ public sealed partial class SettingsService(
 
     public async Task ValidateAsync(HttpContext context, int monitorPort)
     {
-        var body = await ReadGuardedAsync(context, monitorPort).ConfigureAwait(false);
+        var body = await ReadGuardedAsync(context, monitorPort, MaxBodyBytes).ConfigureAwait(false);
         if (body is null)
         {
             return;
@@ -69,7 +66,7 @@ public sealed partial class SettingsService(
             var errors = new List<SettingsError>();
             if (TopLevel(body.RootElement, errors) is { } settings)
             {
-                Check(settings, errors);
+                Check(settings, errors, out _);
             }
 
             await context.Response.WriteAsJsonAsync(new { ok = errors.Count == 0, errors }, Json).ConfigureAwait(false);
@@ -78,7 +75,7 @@ public sealed partial class SettingsService(
 
     public async Task SaveAsync(HttpContext context, int monitorPort)
     {
-        var body = await ReadGuardedAsync(context, monitorPort).ConfigureAwait(false);
+        var body = await ReadGuardedAsync(context, monitorPort, MaxBodyBytes).ConfigureAwait(false);
         if (body is null)
         {
             return;
@@ -86,18 +83,11 @@ public sealed partial class SettingsService(
 
         using (body)
         {
-            // This page writes schema 1: saving over a multi-device file would drop the device prefix of every TagId
-            // and each device's writes switch.
-            if (file.Version == EdgeSettingsFile.MultiDeviceSchemaVersion)
-            {
-                await Reply(context, StatusCodes.Status409Conflict, new { error = "multi-device-file", message = MultiDeviceMessage }).ConfigureAwait(false);
-                return;
-            }
-
             var root = body.RootElement;
             var errors = new List<SettingsError>();
             var settings = TopLevel(root, errors);
-            var bytes = settings is { } proposed ? Check(proposed, errors) : null;
+            EdgeChannelsOptions? tree = null;
+            var bytes = settings is { } proposed ? Check(proposed, errors, out tree) : null;
             if (errors.Count > 0 || bytes is null)
             {
                 await Reply(context, StatusCodes.Status400BadRequest, new { ok = false, errors }).ConfigureAwait(false);
@@ -122,7 +112,7 @@ public sealed partial class SettingsService(
                 return;
             }
 
-            if (!restarter.TryRequest(bytes, out var applyId))
+            if (!restarter.TryRequest(bytes, out var applyId, WriteChanges(devices, tree!)))
             {
                 await Reply(context, StatusCodes.Status409Conflict, new { error = "apply-in-progress" }).ConfigureAwait(false);
                 return;
@@ -141,10 +131,10 @@ public sealed partial class SettingsService(
     /// <summary>
     /// Refuses a request another site could have sent from the operator's browser (D-11), before any password is
     /// looked at: a cross-site <c>Origin</c> or <c>Sec-Fetch-Site</c>, a media type other than application/json (a
-    /// "simple" cross-site request cannot send that), or a body over 1 MB. Returns the parsed body, or null when the
-    /// response has been written.
+    /// "simple" cross-site request cannot send that), or a body over <paramref name="maxBodyBytes"/>. Returns the parsed
+    /// body, or null when the response has been written.
     /// </summary>
-    internal static async Task<JsonDocument?> ReadGuardedAsync(HttpContext context, int monitorPort)
+    internal static async Task<JsonDocument?> ReadGuardedAsync(HttpContext context, int monitorPort, int maxBodyBytes = DefaultMaxBodyBytes)
     {
         var request = context.Request;
         var origin = request.Headers.Origin.ToString();
@@ -173,7 +163,7 @@ public sealed partial class SettingsService(
         int read;
         while ((read = await request.Body.ReadAsync(chunk, context.RequestAborted).ConfigureAwait(false)) > 0)
         {
-            if (buffer.Length + read > MaxBodyBytes)
+            if (buffer.Length + read > maxBodyBytes)
             {
                 await Reply(context, StatusCodes.Status413PayloadTooLarge, new { error = "too-large" }).ConfigureAwait(false);
                 return null;
@@ -212,236 +202,82 @@ public sealed partial class SettingsService(
 
         if (!root.TryGetProperty("settings", out var settings) || settings.ValueKind != JsonValueKind.Object)
         {
-            errors.Add(new SettingsError("settings", "Required, as an object with Plc, Poll and Tags."));
+            errors.Add(new SettingsError("settings", "Required, as an object with Channels."));
             return null;
         }
 
         return errors.Count == 0 ? settings : null;
     }
 
-    /// <summary>Runs every check on proposed settings; returns the file bytes to save when there is no error.</summary>
-    private byte[]? Check(JsonElement settings, List<SettingsError> errors)
+    /// <summary>Runs every check on a proposed tree; returns the file bytes to save when there is no error.</summary>
+    private byte[]? Check(JsonElement settings, List<SettingsError> errors, out EdgeChannelsOptions? tree)
     {
-        JsonObject edge;
-        try
+        tree = null;
+        SettingsTree.CheckShapeAndLimits(settings, errors);
+        if (errors.Count > 0)
         {
-            edge = JsonNode.Parse(settings.GetRawText())!.AsObject();
-        }
-        catch (JsonException)
-        {
-            errors.Add(new SettingsError("settings", "Not valid JSON."));
             return null;
         }
 
-        var candidate = FileBytes(edge);
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(new JsonObject
+        {
+            ["SchemaVersion"] = EdgeSettingsFile.MultiDeviceSchemaVersion,
+            ["Edge"] = JsonNode.Parse(settings.GetRawText()),
+        });
+
         IReadOnlyList<KeyValuePair<string, string?>> pairs;
         try
         {
-            pairs = EdgeSettingsFile.ParseOwned(candidate, "proposed settings");
+            pairs = EdgeSettingsFile.ParseOwned(bytes, "proposed settings");
         }
         catch (InvalidOperationException ex)
         {
-            errors.Add(new SettingsError(PathOf(ex.Message), ShapeMessage));
+            errors.Add(new SettingsError(NodeOf(PathOf(ex.Message)), ShapeMessage));
             return null;
         }
 
-        var proposed = Bind(pairs, errors);
-        if (proposed is null)
-        {
-            return null;
-        }
-
-        // An empty tag object binds to nothing and would shift the binder's indices against the JSON array.
-        var tagsNode = edge.FirstOrDefault(p => p.Key.Equals("Tags", StringComparison.OrdinalIgnoreCase)).Value as JsonArray;
-        if ((tagsNode?.Count ?? 0) != proposed.Tags.Length)
-        {
-            errors.Add(new SettingsError("Edge:Tags", "Every tag must be a non-empty object."));
-            return null;
-        }
-
-        if (proposed.Tags.Length > MaxTags)
-        {
-            errors.Add(new SettingsError("Edge:Tags", $"At most {MaxTags} tags."));
-            return null;
-        }
-
-        // The startup validators run below even when the writable rule failed, so the page lists every error at once.
-        var kept = ApplyWritableRule(proposed, errors);
-
-        // Kept writable tags are saved writable again; everything else as sent (Writable false).
-        foreach (var index in kept)
-        {
-            var tag = tagsNode![index]!.AsObject();
-            foreach (var key in tag.Select(p => p.Key).Where(k => k.Equals("Writable", StringComparison.OrdinalIgnoreCase)).ToList())
-            {
-                tag.Remove(key);
-            }
-
-            tag["Writable"] = true;
-        }
-
-        var bytes = FileBytes(edge);
-        RunStartupValidators(EdgeSettingsFile.ParseOwned(bytes, "proposed settings"), proposed.Tags, errors);
-        return errors.Count == 0 ? bytes : null;
-    }
-
-    private static byte[] FileBytes(JsonObject edge) =>
-        JsonSerializer.SerializeToUtf8Bytes(new JsonObject
-        {
-            ["SchemaVersion"] = EdgeSettingsFile.SchemaVersion,
-            ["Edge"] = JsonNode.Parse(edge.ToJsonString()),
-        });
-
-    private static ProposedSettings? Bind(IReadOnlyList<KeyValuePair<string, string?>> pairs, List<SettingsError> errors)
-    {
-        var view = new ConfigurationBuilder().AddInMemoryCollection(pairs).Build();
+        EdgeChannelsOptions proposed;
         try
         {
-            var plc = view.GetSection(PlcProtocolOptions.SectionName);
-            return new ProposedSettings(
-                view.GetSection(EdgeOptions.SectionName).Get<PlcTagCatalogOptions>()?.Tags ?? [],
-                plc[nameof(PlcProtocolOptions.Protocol)],
-                plc.Get<SiemensS7Options>() ?? new SiemensS7Options(),
-                plc.Get<SlmpOptions>() ?? new SlmpOptions());
+            proposed = new ConfigurationBuilder().AddInMemoryCollection(pairs).Build()
+                .GetSection(EdgeChannelsOptions.SectionName).Get<EdgeChannelsOptions>() ?? new EdgeChannelsOptions();
         }
         catch (InvalidOperationException ex)
         {
             // The binder names the value before the key ("value '…' at 'Edge:…'"): take the key after "at".
             var path = BinderPathPattern().Match(ex.Message) is { Success: true } m ? m.Groups[1].Value : "";
-            errors.Add(new SettingsError(path, "The value does not have the expected type."));
+            errors.Add(new SettingsError(NodeOf(path), "The value does not have the expected type."));
             return null;
         }
+
+        // The validator's errors start with their key; each device's own checks are pinned by SettingsTree. Both run,
+        // so the page lists every error at once; one node keeps its first error.
+        var found = EdgeChannelsValidator.Validate(proposed)
+            .Select(error => PathOf(error))
+            .Select(path => new SettingsError(NodeOf(path), FixedMessage(NodeOf(path))))
+            .Concat(SettingsTree.DeviceErrors(proposed))
+            .DistinctBy(error => error.Path)
+            .ToList();
+        if (found.Count > 0)
+        {
+            errors.AddRange(found);
+            return null;
+        }
+
+        RunStartupRegistration(pairs, errors);
+        tree = proposed;
+        return errors.Count == 0 ? bytes : null;
     }
 
     /// <summary>
-    /// D-06: the page cannot make a tag writable. A writable tag survives a save only when sent back exactly as it is
-    /// (ordinal TagId, canonical address, DataType, Min, Max), and while one survives the PLC cannot change, or
-    /// Cloud commands would land on another PLC or address. Returns the indices of the kept writable tags.
+    /// Registers the agent exactly as a start would, on the proposed tree over this Edge's configuration with every key
+    /// a schema-2 file owns removed (so channels from appsettings never mix into the proposal). The buffer path points
+    /// nowhere, so no settings file is read.
     /// </summary>
-    private List<int> ApplyWritableRule(ProposedSettings proposed, List<SettingsError> errors)
-    {
-        var writable = tags.Value.Tags.Where(t => t.Writable).ToList();
-        var kept = new List<int>();
-        for (var i = 0; i < proposed.Tags.Length; i++)
-        {
-            var tag = proposed.Tags[i];
-            if (tag.Writable)
-            {
-                errors.Add(new SettingsError($"Edge:Tags:{i}:Writable",
-                    "The settings page cannot make a tag writable; an administrator edits Writable in the settings file."));
-                continue;
-            }
-
-            var current = writable.FirstOrDefault(w => w.TagId.Equals(tag.TagId, StringComparison.OrdinalIgnoreCase));
-            if (current is null)
-            {
-                continue;
-            }
-
-            if (Unchanged(current, tag))
-            {
-                kept.Add(i);
-            }
-            else
-            {
-                errors.Add(new SettingsError($"Edge:Tags:{i}",
-                    "A writable tag can only be kept unchanged (TagId, Address, DataType, Min, Max) or deleted."));
-            }
-        }
-
-        if (kept.Count > 0)
-        {
-            foreach (var key in ChangedPlcKeys(proposed))
-            {
-                errors.Add(new SettingsError($"Edge:Plc:{key}",
-                    "The PLC cannot change while writable tags are kept; delete them first, or an administrator edits the settings file."));
-            }
-        }
-
-        return kept;
-    }
-
-    private bool Unchanged(PlcTagDefinition current, PlcTagDefinition proposed)
-    {
-        if (!string.Equals(current.TagId, proposed.TagId, StringComparison.Ordinal)
-            || current.DataType != proposed.DataType || current.Min != proposed.Min || current.Max != proposed.Max
-            || registry.Devices is not [var device] // this page edits a single-PLC Edge, whose only device it is
-            || !device.Catalog.TryGet(current.TagId, out var resolved))
-        {
-            return false;
-        }
-
-        try
-        {
-            return device.Syntax.Parse(proposed.Address, proposed.DataType).Canonical == resolved.Address.Canonical;
-        }
-        catch (PlcException)
-        {
-            return false;
-        }
-    }
-
-    private IEnumerable<string> ChangedPlcKeys(ProposedSettings proposed)
-    {
-        PlcProtocolOptions.TryParse(protocol.Value.Protocol, out var currentProtocol);
-        if (!PlcProtocolOptions.TryParse(proposed.Protocol, out var proposedProtocol) || proposedProtocol != currentProtocol)
-        {
-            yield return nameof(PlcProtocolOptions.Protocol);
-            yield break;
-        }
-
-        if (currentProtocol == PlcProtocol.Slmp)
-        {
-            var now = services.GetRequiredService<IOptions<SlmpOptions>>().Value;
-            if (!string.Equals(now.Host, proposed.Slmp.Host, StringComparison.OrdinalIgnoreCase))
-            {
-                yield return nameof(SlmpOptions.Host);
-            }
-
-            if (now.Port != proposed.Slmp.Port)
-            {
-                yield return nameof(SlmpOptions.Port);
-            }
-
-            yield break;
-        }
-
-        var s7 = services.GetRequiredService<IOptions<SiemensS7Options>>().Value;
-        if (!string.Equals(s7.Host, proposed.S7.Host, StringComparison.OrdinalIgnoreCase))
-        {
-            yield return nameof(SiemensS7Options.Host);
-        }
-
-        if (s7.Port != proposed.S7.Port)
-        {
-            yield return nameof(SiemensS7Options.Port);
-        }
-
-        if (s7.Rack != proposed.S7.Rack)
-        {
-            yield return nameof(SiemensS7Options.Rack);
-        }
-
-        if (s7.Slot != proposed.S7.Slot)
-        {
-            yield return nameof(SiemensS7Options.Slot);
-        }
-
-        if (!string.Equals(s7.CpuType, proposed.S7.CpuType, StringComparison.OrdinalIgnoreCase))
-        {
-            yield return nameof(SiemensS7Options.CpuType);
-        }
-    }
-
-    /// <summary>
-    /// Registers the agent exactly as a start would, on the proposed settings, and resolves the validated options: the
-    /// same validators decide, no rule is copied. The buffer path points nowhere, so no settings file is read.
-    /// </summary>
-    private void RunStartupValidators(
-        IReadOnlyList<KeyValuePair<string, string?>> proposed, PlcTagDefinition[] proposedTags, List<SettingsError> errors)
+    private void RunStartupRegistration(IReadOnlyList<KeyValuePair<string, string?>> proposed, List<SettingsError> errors)
     {
         var values = configuration.AsEnumerable()
-            .Where(pair => pair.Value is not null && !EdgeSettingsFile.IsOwned(pair.Key))
+            .Where(pair => pair.Value is not null && !EdgeSettingsFile.IsOwnedByMultiDevice(pair.Key))
             .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.OrdinalIgnoreCase);
         values["Edge:Buffer:Path"] = Path.Combine(Path.GetTempPath(), "edge-settings-validate", Guid.NewGuid().ToString("N"), "none.db");
         foreach (var (key, value) in proposed)
@@ -449,100 +285,93 @@ public sealed partial class SettingsService(
             values[key] = value;
         }
 
-        var view = new ConfigurationBuilder().AddInMemoryCollection(values).Build();
         var registrations = new ServiceCollection();
         registrations.AddLogging();
         try
         {
-            registrations.AddEdgeAgent(view);
+            registrations.AddEdgeAgent(new ConfigurationBuilder().AddInMemoryCollection(values).Build());
         }
         catch (Exception ex) when (ex is OptionsValidationException or InvalidOperationException)
         {
-            AddFailures(ex, proposedTags, errors);
-            return;
-        }
-
-        using var provider = registrations.BuildServiceProvider();
-        PlcProtocolOptions.TryParse(view[PlcProtocolOptions.KeyName], out var chosen);
-        var checks = new List<Func<object>>
-        {
-            () => provider.GetRequiredService<IOptions<PlcProtocolOptions>>().Value,
-            () => provider.GetRequiredService<IOptions<PollOptions>>().Value,
-            () => provider.GetRequiredService<IOptions<PlcTagCatalogOptions>>().Value,
-            chosen == PlcProtocol.Slmp
-                ? () => provider.GetRequiredService<IOptions<SlmpOptions>>().Value
-                : () => provider.GetRequiredService<IOptions<SiemensS7Options>>().Value,
-        };
-        foreach (var check in checks)
-        {
-            try
-            {
-                _ = check();
-            }
-            catch (Exception ex) when (ex is OptionsValidationException or InvalidOperationException)
-            {
-                AddFailures(ex, proposedTags, errors);
-            }
-        }
-    }
-
-    /// <summary>
-    /// Validator text names submitted values (addresses, ids, numbers), so the response carries only the key path and
-    /// a fixed message. A tag error is pinned to its row when the validator text names that tag's id.
-    /// </summary>
-    private static void AddFailures(Exception ex, PlcTagDefinition[] proposedTags, List<SettingsError> errors)
-    {
-        var failures = ex is OptionsValidationException validation ? validation.Failures : [ex.Message];
-        foreach (var failure in failures)
-        {
-            var path = PathOf(failure);
-            if (path.StartsWith("Edge:Tags", StringComparison.Ordinal))
-            {
-                var row = Array.FindIndex(proposedTags, t => t.TagId.Length > 0 && failure.Contains($"'{t.TagId}'", StringComparison.Ordinal));
-                path = row >= 0 ? $"Edge:Tags:{row}" : "Edge:Tags";
-            }
-
+            // Every rule this repeats was checked above with its node; this only guards against a rule added later.
+            var path = NodeOf(PathOf(ex.Message));
             errors.Add(new SettingsError(path, FixedMessage(path)));
         }
     }
 
-    internal static string FixedMessage(string path) => path switch
+    /// <summary>
+    /// What a save changes in the effective write permissions, against the running devices: each device's
+    /// <c>WritesEnabled</c>, and each TagId writable through its device (<c>WritesEnabled</c> and <c>Writable</c>).
+    /// Compared by name, so a device or tag deleted, added or renamed counts as a change. Devices first, then tags.
+    /// </summary>
+    internal static IReadOnlyList<WriteChange> WriteChanges(EdgeDeviceSet running, EdgeChannelsOptions proposed)
     {
-        _ when path.StartsWith("Edge:Tags", StringComparison.Ordinal) =>
-            "Tag is not valid: check TagId, Address and DataType, duplicate ids (case-insensitive), Min/Max, and overlap with writable tags.",
-        "Edge:Plc:Protocol" => "Protocol must be S7 or Slmp, and only S7 allows commands.",
-        _ when path.StartsWith("Edge:Plc:", StringComparison.Ordinal) => $"{path} is not valid for this protocol.",
-        _ when path.StartsWith("Edge:Poll:", StringComparison.Ordinal) => $"{path} is out of range.",
-        _ => "The settings are not valid.",
-    };
-    private object CurrentSettings()
-    {
-        PlcProtocolOptions.TryParse(protocol.Value.Protocol, out var selected);
-        object plc;
-        if (selected == PlcProtocol.Slmp)
+        var before = running.Devices.Where(device => device.WritesEnabled).ToList();
+        var after = proposed.Channels.SelectMany(channel => channel.Devices).Where(device => device.WritesEnabled).ToList();
+        return
+        [
+            .. Diff("device", before.Select(device => device.Name), after.Select(device => device.Name)),
+            .. Diff(
+                "tag",
+                before.SelectMany(device => device.Tags.Where(tag => tag.Writable).Select(tag => tag.TagId)),
+                after.SelectMany(device => device.Tags.Where(tag => tag.Writable).Select(tag => EdgeChannelsValidator.PublishedTagId(device, tag)))),
+        ];
+
+        static IEnumerable<WriteChange> Diff(string subject, IEnumerable<string> before, IEnumerable<string> after)
         {
-            var o = services.GetRequiredService<IOptions<SlmpOptions>>().Value;
-            plc = new { Protocol = nameof(PlcProtocol.Slmp), o.Host, o.Port, o.TimeoutMs };
+            var was = before.ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var now = after.ToHashSet(StringComparer.OrdinalIgnoreCase);
+            return was.Union(now, StringComparer.OrdinalIgnoreCase)
+                .Where(name => was.Contains(name) != now.Contains(name))
+                .Order(StringComparer.OrdinalIgnoreCase)
+                .Select(name => new WriteChange(subject, name, was.Contains(name), now.Contains(name)));
         }
-        else
+    }
+
+    /// <summary>
+    /// A key path no shorter than a channel: an error is never pinned to the whole list, which the page cannot show.
+    /// </summary>
+    private static string NodeOf(string path) =>
+        path.Length <= EdgeChannelsOptions.ChannelsKey.Length && EdgeChannelsOptions.ChannelsKey.StartsWith(path, StringComparison.OrdinalIgnoreCase)
+            ? $"{EdgeChannelsOptions.ChannelsKey}:0"
+            : path;
+
+    /// <summary>
+    /// The fixed text for a key path. Validator text names submitted values (addresses, hosts, numbers), so a response
+    /// carries only this. Schema-1 paths stay for the connection tester.
+    /// </summary>
+    internal static string FixedMessage(string path)
+    {
+        if (path.StartsWith(EdgeChannelsOptions.ChannelsKey, StringComparison.Ordinal))
         {
-            var o = services.GetRequiredService<IOptions<SiemensS7Options>>().Value;
-            plc = new { Protocol = nameof(PlcProtocol.S7), o.Host, o.Port, o.Rack, o.Slot, o.CpuType, o.TimeoutMs };
+            var segments = path.Split(':');
+            var isTag = segments.Length >= 7 && segments[5] == "Tags";
+            return (segments[^1], isTag) switch
+            {
+                ("Name", true) => "Tag name: letters, digits, _ . - only; unique as a TagId (case-insensitive), at most 64 characters with the device prefix.",
+                ("Name", false) => "Name: 1..32 letters, digits, _ or -, unique (case-insensitive).",
+                ("Driver", _) => "Driver must be S7, Slmp3E or Mc1E.",
+                ("Model", _) => "Model must be S7-1200, FX5U or FX3U, and belong to the channel's driver.",
+                ("Host", _) => "Host is required, and no other PLC may use the same host and port.",
+                ("Port", _) => "Port is not valid for this model.",
+                ("WritesEnabled", _) => "Writes are not allowed on this model.",
+                ("Writable", _) => "This tag cannot be writable: an input address, or a model whose writes are not allowed.",
+                ("Address", _) => "Address is not valid for this model and data type.",
+                ("DataType", _) => "Data type is not supported by this model.",
+                ("Length", _) => "Length is required for String tags (at least 1) and not allowed on other types.",
+                ("Min" or "Max", _) => "Min/Max are not valid for this data type.",
+                ("Rack" or "Slot" or "TimeoutMs" or "PollIntervalMs" or "CpuType", _) => $"{segments[^1]} is out of range.",
+                ("Tags", _) => "A tag of this PLC is not valid.",
+                _ when isTag || segments[^2] == "Devices" => "This tag or PLC is not valid.",
+                _ => "The settings are not valid.",
+            };
         }
 
-        return new
+        return path switch
         {
-            Plc = plc,
-            Poll = new { poll.Value.IntervalMs },
-            Tags = tags.Value.Tags.Select(t => new
-            {
-                t.TagId,
-                t.Address,
-                DataType = t.DataType.ToString(),
-                t.Writable,
-                t.Min,
-                t.Max,
-            }).ToArray(),
+            "Edge:Plc:Protocol" => "Protocol must be S7 or Slmp, and only S7 allows commands.",
+            _ when path.StartsWith("Edge:Plc:", StringComparison.Ordinal) => $"{path} is not valid for this protocol.",
+            _ => "The settings are not valid.",
         };
     }
 
@@ -581,8 +410,6 @@ public sealed partial class SettingsService(
 
     [GeneratedRegex(@" at '(Edge(:[A-Za-z0-9_]+)+)'")]
     private static partial Regex BinderPathPattern();
-
-    private sealed record ProposedSettings(PlcTagDefinition[] Tags, string? Protocol, SiemensS7Options S7, SlmpOptions Slmp);
 }
 
 public sealed record SettingsError(string Path, string Message);

@@ -221,6 +221,15 @@ public sealed class EdgeSupervisor(
             var inner = await StartInnerAsync(applying, stopping).ConfigureAwait(false);
             SetInner(inner);
             TryRun(() => File.Delete(markerPath));
+
+            // Only now do the new write permissions hold: a rolled-back save changed nothing on the PLCs.
+            foreach (var change in request.WriteChanges ?? [])
+            {
+                logger.LogWarning(
+                    "Write permission changed by settings apply {ApplyId}: {Subject} {Name} {Before} -> {After}.",
+                    request.ApplyId, change.Subject, change.Name, OnOff(change.Before), OnOff(change.After));
+            }
+
             restarter.Complete(request.ApplyId, ApplyState.Applied, Revision(inner), null);
             logger.LogInformation("Settings applied (revision {Revision}).", Revision(inner));
             return;
@@ -271,6 +280,8 @@ public sealed class EdgeSupervisor(
             service.ExitCode = exitCode;
         }
     }
+
+    private static string OnOff(bool value) => value ? "on" : "off";
 
     private void TryRun(Action action)
     {

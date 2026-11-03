@@ -184,6 +184,9 @@ public sealed class EdgeSettingsFile
     /// <summary>Whether <paramref name="key"/> belongs to a section a schema-1 settings file replaces.</summary>
     public static bool IsOwned(string key) => IsOwnedBy(SchemaVersion, key);
 
+    /// <summary>Whether <paramref name="key"/> belongs to a section a schema-2 settings file replaces.</summary>
+    public static bool IsOwnedByMultiDevice(string key) => IsOwnedBy(MultiDeviceSchemaVersion, key);
+
     private static bool IsOwnedBy(int version, string key) =>
         (version == MultiDeviceSchemaVersion ? MultiDeviceOwnedSections : OwnedSections).Any(section =>
             key.Equals(section, StringComparison.OrdinalIgnoreCase)

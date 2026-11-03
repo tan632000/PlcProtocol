@@ -69,47 +69,61 @@ public sealed class PlcDeviceRegistry : IAsyncDisposable
     {
         ArgumentNullException.ThrowIfNull(set);
 
-        var errors = new List<string>();
-        foreach (var device in set.Devices)
-        {
-            var prefix = $"Device '{device.Name}': ";
-            if (!Enum.IsDefined(device.Driver))
-            {
-                errors.Add(NoDriverMessage(device));
-                continue;
-            }
-
-            var options = device.Driver switch
-            {
-                PlcDriverKind.S7 => new SiemensS7OptionsValidator().Validate(null, S7Options(device)),
-                PlcDriverKind.Slmp3E => new SlmpOptionsValidator().Validate(null, SlmpOptions(device)),
-                _ => new Mc1eOptionsValidator().Validate(null, Mc1eOptions(device)),
-            };
-            if (options.Failed)
-            {
-                // The validators name the single-PLC section; here the device is the context.
-                errors.AddRange(options.Failures.Select(f => prefix + f.Replace($"{PlcProtocolOptions.SectionName}:", "", StringComparison.Ordinal)));
-            }
-
-            if (device.PollIntervalMs is < 100 or > 3_600_000)
-            {
-                errors.Add($"{prefix}PollIntervalMs must be within 100..3600000 (was {device.PollIntervalMs}).");
-            }
-
-            try
-            {
-                _ = new PlcTagCatalog(new PlcTagCatalogOptions { Tags = [.. device.Tags] }, SyntaxFor(device.Driver));
-            }
-            catch (InvalidOperationException ex)
-            {
-                errors.Add(prefix + ex.Message);
-            }
-        }
-
+        var errors = set.Devices.SelectMany(Check).Select(problem => problem.Message).ToList();
         if (errors.Count > 0)
         {
             throw new InvalidOperationException($"{EdgeChannelsOptions.ChannelsKey} is invalid. {string.Join(" ", errors)}");
         }
+    }
+
+    /// <summary>
+    /// One device's problems, each with the field it is about (and the tag, for a catalog problem), so the settings page
+    /// can pin it; the message is the one a failed start shows. The catalog stops at a device's first bad tag.
+    /// </summary>
+    internal static IReadOnlyList<DeviceProblem> Check(ResolvedDevice device)
+    {
+        ArgumentNullException.ThrowIfNull(device);
+
+        var prefix = $"Device '{device.Name}': ";
+        if (!Enum.IsDefined(device.Driver))
+        {
+            return [new DeviceProblem(null, "Driver", NoDriverMessage(device))];
+        }
+
+        var problems = new List<DeviceProblem>();
+        var options = device.Driver switch
+        {
+            PlcDriverKind.S7 => new SiemensS7OptionsValidator().Validate(null, S7Options(device)),
+            PlcDriverKind.Slmp3E => new SlmpOptionsValidator().Validate(null, SlmpOptions(device)),
+            _ => new Mc1eOptionsValidator().Validate(null, Mc1eOptions(device)),
+        };
+        if (options.Failed)
+        {
+            // The validators name the single-PLC section; here the device is the context.
+            foreach (var failure in options.Failures)
+            {
+                var text = failure.Replace($"{PlcProtocolOptions.SectionName}:", "", StringComparison.Ordinal);
+                problems.Add(new DeviceProblem(null, new string([.. text.TakeWhile(char.IsLetter)]), prefix + text));
+            }
+        }
+
+        if (device.PollIntervalMs is < 100 or > 3_600_000)
+        {
+            problems.Add(new DeviceProblem(null, "PollIntervalMs", $"{prefix}PollIntervalMs must be within 100..3600000 (was {device.PollIntervalMs})."));
+        }
+
+        try
+        {
+            _ = new PlcTagCatalog(new PlcTagCatalogOptions { Tags = [.. device.Tags] }, SyntaxFor(device.Driver));
+        }
+        catch (InvalidOperationException ex)
+        {
+            problems.Add(ex.Data[PlcTagCatalog.FieldKey] is string field
+                ? new DeviceProblem(ex.Data[PlcTagCatalog.TagIdKey] as string, field, prefix + ex.Message)
+                : new DeviceProblem(null, "Tags", prefix + ex.Message));
+        }
+
+        return problems;
     }
 
     internal static SiemensS7Options S7Options(ResolvedDevice device) => new()
@@ -181,3 +195,6 @@ public sealed class PlcDeviceRegistry : IAsyncDisposable
         return devices;
     }
 }
+
+/// <summary>A problem of one device: <see cref="Field"/> of the device, or of the tag <see cref="TagId"/> when set.</summary>
+internal sealed record DeviceProblem(string? TagId, string Field, string Message);

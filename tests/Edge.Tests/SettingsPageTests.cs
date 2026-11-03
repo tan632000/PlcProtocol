@@ -57,15 +57,73 @@ public sealed partial class SettingsPageTests : IAsyncDisposable
     }
 
     [Fact]
-    public async Task DataTypeChoices_AreExactlyTheEdgesDataTypes()
+    public async Task SettingsPage_HasNoInlineEventHandler()
     {
         var html = await PageAsync();
 
-        var select = DataTypeSelect().Match(html);
-        Assert.True(select.Success, "no <select id=\"dataTypeChoices\"> on the page");
-        var values = OptionValue().Matches(select.Value).Select(m => m.Groups[1].Value).ToArray();
-        // String needs a Length, which the single-PLC (schema 1) settings file has no key for.
-        Assert.Equal(Enum.GetNames<PlcDataType>().Where(name => name != nameof(PlcDataType.String)), values);
+        Assert.DoesNotMatch(@"<[^>]+\son[a-z]+\s*=", html);
+        Assert.DoesNotMatch(@"\.on[a-z]+\s*=", html);
+    }
+
+    [Fact]
+    public async Task SettingsPage_CallsEverySettingsRoute()
+    {
+        var html = await PageAsync();
+
+        foreach (var route in new[] { "\"/api/settings\"", "\"/api/settings/validate\"", "\"/api/settings/test-connection\"", "\"/api/settings/csv/parse\"", "\"/api/settings/csv/format\"", "\"/api/status\"" })
+        {
+            Assert.Contains(route, html);
+        }
+    }
+
+    [Fact]
+    public async Task ModelsAndDataTypes_ComeFromTheEdge_NotFromThePage()
+    {
+        var html = await PageAsync();
+
+        foreach (var field in new[] { ".models", ".dataTypes", ".portHint", ".writesAllowed", ".defaultPort", ".warnings", ".commandsEnabled" })
+        {
+            Assert.Contains(field, html);
+        }
+
+        // No list of its own: no model name, and no data type other than String (whose Length the page shows).
+        foreach (var model in PlcModelCatalog.Models)
+        {
+            Assert.DoesNotContain(model.Name, html);
+        }
+
+        foreach (var name in Enum.GetNames<PlcDataType>().Where(name => name != nameof(PlcDataType.String)))
+        {
+            Assert.DoesNotMatch($"[\"'`]{name}[\"'`]", html);
+            Assert.DoesNotContain($"<option value=\"{name}\"", html);
+        }
+
+        foreach (var driver in Enum.GetNames<Configuration.PlcDriverKind>())
+        {
+            Assert.DoesNotMatch($"[\"'`]{driver}[\"'`]", html);
+        }
+    }
+
+    [Fact]
+    public async Task UnreadableNumbers_AreRefused_AndTheCsvDownloadStartsWithABom()
+    {
+        var html = await PageAsync();
+
+        // A number field reports "" for text it cannot read; the page must not send that as "not set".
+        Assert.Contains("validity.badInput", html);
+        // Excel opens a UTF-8 CSV without a BOM as ANSI.
+        Assert.Contains("new Blob([\"\\uFEFF\", json.csv]", html);
+    }
+
+    [Fact]
+    public async Task ThePassword_IsNeverStoredByThePage()
+    {
+        var html = await PageAsync();
+
+        Assert.DoesNotContain("localStorage", html);
+        Assert.DoesNotContain("sessionStorage", html);
+        Assert.DoesNotContain("indexedDB", html);
+        Assert.DoesNotContain("document.cookie", html);
     }
 
     [Fact]
@@ -128,12 +186,6 @@ public sealed partial class SettingsPageTests : IAsyncDisposable
         probe.Start();
         return ((IPEndPoint)probe.LocalEndpoint).Port;
     }
-
-    [GeneratedRegex(@"<select[^>]*id=""dataTypeChoices""[^>]*>.*?</select>", RegexOptions.Singleline)]
-    private static partial Regex DataTypeSelect();
-
-    [GeneratedRegex(@"<option value=""([^""]+)""")]
-    private static partial Regex OptionValue();
 
     [GeneratedRegex(@"<input[^>]*type=""password""[^>]*>")]
     private static partial Regex PasswordInput();

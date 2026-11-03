@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Globalization;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Sockets;
@@ -15,9 +16,11 @@ using Microsoft.Extensions.Time.Testing;
 namespace IndustrialIot.Edge.Tests;
 
 /// <summary>
-/// <c>POST /api/settings/test-connection</c> checks a proposed PLC connection without saving: a separate driver,
-/// disposed after the test, or the running driver's own connection when the proposal names the PLC already in use.
-/// Only the settings password holder, from the operator's page, one test at a time and at most 10 a minute.
+/// <c>POST /api/settings/test-connection</c> checks a PLC without saving: a saved one by name, or an unsaved one
+/// described by driver, model and endpoint. A separate driver is made and disposed after the test, unless a running
+/// device has exactly that connection: then its own driver answers, and the same endpoint with other settings is
+/// refused rather than opening a second connection. Only the settings password holder, from the operator's page, one
+/// test at a time and at most 10 a minute.
 /// </summary>
 public sealed class PlcConnectionTesterTests : IAsyncDisposable
 {
@@ -60,12 +63,12 @@ public sealed class PlcConnectionTesterTests : IAsyncDisposable
     }
 
     [Fact]
-    public async Task Slmp_AgainstAFakePlc_IsOk()
+    public async Task Fx5u_AgainstAFakePlc_IsOk()
     {
         await using var plc = new FakeSlmpServer();
         await StartAsync();
 
-        var (status, result) = await TestAsync(new JsonObject { ["Protocol"] = "Slmp", ["Host"] = "127.0.0.1", ["Port"] = plc.Port, ["TimeoutMs"] = 1000 });
+        var (status, result) = await TestAsync(Proposed("Slmp3E", "FX5U", plc.Port));
 
         Assert.Equal(HttpStatusCode.OK, status);
         Assert.Equal("ok", result.GetProperty("result").GetString());
@@ -73,12 +76,29 @@ public sealed class PlcConnectionTesterTests : IAsyncDisposable
     }
 
     [Fact]
-    public async Task ClosedPort_IsUnreachable_WithinTheTimeoutPlusOneSecond()
+    public async Task Fx3u_AgainstAFakeAdapter_IsOk_AndSendsNothing()
+    {
+        await using var adapter = new FakeMc1eServer();
+        await StartAsync();
+
+        var (status, result) = await TestAsync(Proposed("Mc1E", "FX3U", adapter.Port));
+
+        Assert.Equal(HttpStatusCode.OK, status);
+        Assert.Equal("ok", result.GetProperty("result").GetString());
+        Assert.Equal(1, adapter.Connections);
+        Assert.Empty(adapter.Frames);
+    }
+
+    [Theory]
+    [InlineData("S7", "S7-1200")]
+    [InlineData("Slmp3E", "FX5U")]
+    [InlineData("Mc1E", "FX3U")]
+    public async Task ClosedPort_IsUnreachable_WithinTheTimeoutPlusOneSecond(string driver, string model)
     {
         await StartAsync();
         var clock = Stopwatch.StartNew();
 
-        var (status, result) = await TestAsync(S7(ClosedPort(), timeoutMs: 1000));
+        var (status, result) = await TestAsync(Proposed(driver, model, ClosedPort()));
 
         Assert.Equal(HttpStatusCode.OK, status);
         Assert.Equal("unreachable", result.GetProperty("result").GetString());
@@ -130,7 +150,9 @@ public sealed class PlcConnectionTesterTests : IAsyncDisposable
         {
             ["revision"] = revision,
             ["password"] = Password,
-            ["settings"] = new JsonObject { ["Plc"] = S7(plc.Port), ["Tags"] = new JsonArray() },
+            ["settings"] = JsonNode.Parse($$"""
+                {"Channels":[{"Name":"S7","Driver":"S7","Devices":[{"Name":"Line","Model":"S7-1200","Host":"127.0.0.1","Port":{{plc.Port}},"Tags":[]}]}]}
+                """),
         };
         using var saved = await SendAsync("/api/settings", HttpMethod.Put, save.ToJsonString());
         Assert.Equal(HttpStatusCode.TooManyRequests, saved.StatusCode);
@@ -144,12 +166,62 @@ public sealed class PlcConnectionTesterTests : IAsyncDisposable
         await WaitUntilAsync(() => plc.OpenConnections == 1, "poller connected");
         var accepted = plc.AcceptCount;
 
-        var (status, result) = await TestAsync(S7(plc.Port));
+        // The host as typed, with spaces: still the PLC the poller reads.
+        var (status, result) = await TestAsync(S7(plc.Port, host: " 127.0.0.1 "));
 
         Assert.Equal(HttpStatusCode.OK, status);
         Assert.Equal("ok", result.GetProperty("result").GetString());
         Assert.Equal(accepted, plc.AcceptCount);
         Assert.Equal(1, plc.OpenConnections);
+    }
+
+    [Theory]
+    [InlineData("A", "S7", "S7-1200")]
+    [InlineData("B", "Slmp3E", "FX5U")]
+    [InlineData("C", "Mc1E", "FX3U")]
+    public async Task AProposedDeviceEqualToARunningOne_IsAnsweredByItsDriver(string name, string driver, string model)
+    {
+        // Nothing listens on these ports: a second driver would answer "unreachable".
+        var (edge, drivers, ports) = MultiDeviceEdge();
+        await using (edge)
+        {
+            var tester = edge.Services.GetRequiredService<PlcConnectionTester>();
+            // A is running on "LocalHost": typed with spaces and in another case, it is still that PLC.
+            var proposed = Proposed(driver, model, ports[name], host: name == "A" ? " localHOST " : HostOf(name));
+
+            var (status, result) = await TestDirectAsync(tester, Body(proposed, Password));
+
+            Assert.Equal((int)HttpStatusCode.OK, status);
+            Assert.Equal("ok", result.GetProperty("result").GetString());
+            Assert.Equal(1, drivers[name].ReachabilityChecks);
+            Assert.Equal(0, drivers.Where(d => d.Key != name).Sum(d => d.Value.ReachabilityChecks));
+        }
+    }
+
+    [Fact]
+    public async Task TheEndpointOfARunningDevice_WithOtherSettings_Is409_AndNothingConnects()
+    {
+        var (edge, drivers, ports) = MultiDeviceEdge();
+        await using (edge)
+        {
+            var tester = edge.Services.GetRequiredService<PlcConnectionTester>();
+
+            var otherSlot = Proposed("S7", "S7-1200", ports["A"], host: "localhost");
+            otherSlot["slot"] = 2;
+            var otherRack = Proposed("S7", "S7-1200", ports["A"], host: "localhost");
+            otherRack["rack"] = 1;
+            var (slotStatus, slotResult) = await TestDirectAsync(tester, Body(otherSlot, Password));
+            var (rackStatus, rackResult) = await TestDirectAsync(tester, Body(otherRack, Password));
+            var (driverStatus, driverResult) = await TestDirectAsync(tester, Body(Proposed("Mc1E", "FX3U", ports["B"], host: HostOf("B")), Password));
+
+            Assert.Equal((int)HttpStatusCode.Conflict, slotStatus);
+            Assert.Equal("endpoint-in-use", slotResult.GetProperty("error").GetString());
+            Assert.Equal((int)HttpStatusCode.Conflict, rackStatus);
+            Assert.Equal("endpoint-in-use", rackResult.GetProperty("error").GetString());
+            Assert.Equal((int)HttpStatusCode.Conflict, driverStatus);
+            Assert.Equal("endpoint-in-use", driverResult.GetProperty("error").GetString());
+            Assert.All(drivers.Values, d => Assert.Equal(0, d.ReachabilityChecks));
+        }
     }
 
     [Fact]
@@ -165,65 +237,73 @@ public sealed class PlcConnectionTesterTests : IAsyncDisposable
     }
 
     [Fact]
-    public async Task SeveralPlcs_Is409_AndNothingConnects()
+    public async Task BodyOverOneMegabyte_Is413()
     {
-        var driver = new FakePlcDriver();
-        await using var edge = EdgeTestHost.Create(
-            EdgeTestHost.MultiDevice(new Dictionary<string, string?>
-            {
-                ["Edge:Channels:0:Name"] = "S7",
-                ["Edge:Channels:0:Driver"] = "S7",
-                ["Edge:Channels:0:Devices:0:Name"] = "A",
-                ["Edge:Channels:0:Devices:0:Model"] = "S7-1200",
-                ["Edge:Channels:0:Devices:0:Host"] = "127.0.0.1",
-                ["Edge:Channels:0:Devices:1:Name"] = "B",
-                ["Edge:Channels:0:Devices:1:Model"] = "S7-1200",
-                ["Edge:Channels:0:Devices:1:Host"] = "127.0.0.2",
-            }),
-            services => services.UseDriver(driver));
-        var tester = edge.Services.GetRequiredService<PlcConnectionTester>();
-        var context = new Microsoft.AspNetCore.Http.DefaultHttpContext();
-        context.Request.ContentType = "application/json";
-        context.Request.Body = new MemoryStream(Encoding.UTF8.GetBytes(Body(S7(ClosedPort()), Password)));
-        context.Response.Body = new MemoryStream();
+        await StartAsync();
 
-        await tester.TestAsync(context, _port);
+        using var response = await SendAsync("/api/settings/test-connection", HttpMethod.Post, new string(' ', SettingsService.DefaultMaxBodyBytes + 10) + "{}");
 
-        Assert.Equal((int)HttpStatusCode.Conflict, context.Response.StatusCode);
-        context.Response.Body.Position = 0;
-        Assert.Equal("several-plcs", JsonDocument.Parse(context.Response.Body).RootElement.GetProperty("error").GetString());
+        Assert.Equal(HttpStatusCode.RequestEntityTooLarge, response.StatusCode);
+    }
+
+    public static TheoryData<string, string> InvalidProposals => new()
+    {
+        { "model-of-another-driver", "proposed:model" },
+        { "fx3u-on-the-s7-port", "proposed:port" },
+        { "fx5u-without-port", "proposed:port" },
+        { "unknown-driver", "proposed:driver" },
+        { "no-host", "proposed:host" },
+        { "timeout-out-of-range", "proposed:timeoutMs" },
+        { "unknown-key", "proposed:color" },
+        { "schema-1-body", "plc" },
+    };
+
+    [Theory]
+    [MemberData(nameof(InvalidProposals))]
+    public async Task InvalidProposal_Is400_NamingTheKey_WithoutTheValue(string fault, string expectedPath)
+    {
+        await StartAsync();
+        var body = fault switch
+        {
+            "model-of-another-driver" => Body(Proposed("S7", "FX5U", 5000, EchoedHost), Password),
+            "fx3u-on-the-s7-port" => Body(Proposed("Mc1E", "FX3U", 102, EchoedHost), Password),
+            "fx5u-without-port" => Body(Proposed("Slmp3E", "FX5U", null, EchoedHost), Password),
+            "unknown-driver" => Body(Proposed("Modbus", "FX5U", 5000, EchoedHost), Password),
+            "no-host" => Body(Proposed("S7", "S7-1200", 102, host: "  "), Password),
+            "timeout-out-of-range" => Body(With(Proposed("Slmp3E", "FX5U", 5000, EchoedHost), "timeoutMs", 5), Password),
+            "unknown-key" => Body(With(Proposed("S7", "S7-1200", 102, EchoedHost), "color", "red"), Password),
+            "schema-1-body" => new JsonObject { ["password"] = Password, ["plc"] = new JsonObject { ["Protocol"] = "S7", ["Host"] = "10.9.8.7" } }.ToJsonString(),
+            _ => throw new ArgumentOutOfRangeException(nameof(fault)),
+        };
+
+        using var response = await SendAsync("/api/settings/test-connection", HttpMethod.Post, body);
+        var text = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        var paths = JsonDocument.Parse(text).RootElement.GetProperty("errors").EnumerateArray().Select(e => e.GetProperty("path").GetString()).ToList();
+        Assert.Contains(expectedPath, paths);
+        Assert.DoesNotContain(EchoedHost, text);
+        Assert.DoesNotContain("Modbus", text);
+        Assert.DoesNotContain("\"red\"", text);
     }
 
     [Fact]
-    public async Task TheOnlyDeviceOfAMultiDeviceEdge_IsAnsweredByItsRunningDriver()
+    public async Task NullFields_AreLeftOut_SoTheModelDefaultsApply()
     {
-        var driver = new ReachabilityDriver();
-        var plcPort = ClosedPort();
-        await using var edge = EdgeTestHost.Create(
-            EdgeTestHost.MultiDevice(new Dictionary<string, string?>
-            {
-                ["Edge:Channels:0:Name"] = "S7",
-                ["Edge:Channels:0:Driver"] = "S7",
-                ["Edge:Channels:0:Devices:0:Name"] = "A",
-                ["Edge:Channels:0:Devices:0:Model"] = "S7-1200",
-                ["Edge:Channels:0:Devices:0:Host"] = "127.0.0.1",
-                ["Edge:Channels:0:Devices:0:Port"] = plcPort.ToString(System.Globalization.CultureInfo.InvariantCulture),
-            }),
-            services => services.UseDriver(driver));
-        SettingsPassword.Store(SettingsPassword.PathFor(edge.Services.GetRequiredService<EdgeSettingsFile>().Path), Password);
-        var tester = edge.Services.GetRequiredService<PlcConnectionTester>();
-        var context = new Microsoft.AspNetCore.Http.DefaultHttpContext();
-        context.Request.ContentType = "application/json";
-        context.Request.Body = new MemoryStream(Encoding.UTF8.GetBytes(Body(S7(plcPort), Password)));
-        context.Response.Body = new MemoryStream();
+        await StartAsync();
+        var proposed = Proposed("S7", "S7-1200", port: null);
+        proposed["port"] = null;
+        proposed["rack"] = null;
+        proposed["slot"] = null;
 
-        await tester.TestAsync(context, _port);
+        // Port 102 by default; nothing listens there on the test machine.
+        var (status, result) = await TestAsync(proposed);
 
-        // Nothing listens on plcPort: a second driver would answer "unreachable".
-        context.Response.Body.Position = 0;
-        Assert.Equal("ok", JsonDocument.Parse(context.Response.Body).RootElement.GetProperty("result").GetString());
-        Assert.Equal(1, driver.ReachabilityChecks);
+        Assert.Equal(HttpStatusCode.OK, status);
+        Assert.Equal("unreachable", result.GetProperty("result").GetString());
     }
+
+    private const string EchoedHost = "10.9.8.7";
 
     [Fact]
     public async Task ANamedDevice_IsTestedThroughItsOwnRunningDriverOnly()
@@ -247,8 +327,8 @@ public sealed class PlcConnectionTesterTests : IAsyncDisposable
         SettingsPassword.Store(SettingsPassword.PathFor(edge.Services.GetRequiredService<EdgeSettingsFile>().Path), Password);
         var tester = edge.Services.GetRequiredService<PlcConnectionTester>();
 
-        var (status, result) = await TestDirectAsync(tester, new JsonObject { ["password"] = Password, ["device"] = "b" });
-        var (unknownStatus, unknown) = await TestDirectAsync(tester, new JsonObject { ["password"] = Password, ["device"] = "C" });
+        var (status, result) = await TestDirectAsync(tester, new JsonObject { ["password"] = Password, ["device"] = "b" }.ToJsonString());
+        var (unknownStatus, unknown) = await TestDirectAsync(tester, new JsonObject { ["password"] = Password, ["device"] = "C" }.ToJsonString());
 
         Assert.Equal((int)HttpStatusCode.OK, status);
         Assert.Equal("ok", result.GetProperty("result").GetString());
@@ -269,29 +349,18 @@ public sealed class PlcConnectionTesterTests : IAsyncDisposable
                 ["Edge:Channels:0:Devices:0:Name"] = "Old",
                 ["Edge:Channels:0:Devices:0:Model"] = "FX3U",
                 ["Edge:Channels:0:Devices:0:Host"] = "127.0.0.1",
-                ["Edge:Channels:0:Devices:0:Port"] = adapter.Port.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                ["Edge:Channels:0:Devices:0:Port"] = adapter.Port.ToString(CultureInfo.InvariantCulture),
                 ["Edge:Channels:0:Devices:0:Enabled"] = "false",
             }));
         SettingsPassword.Store(SettingsPassword.PathFor(edge.Services.GetRequiredService<EdgeSettingsFile>().Path), Password);
         var tester = edge.Services.GetRequiredService<PlcConnectionTester>();
 
-        var (status, result) = await TestDirectAsync(tester, new JsonObject { ["password"] = Password, ["device"] = "Old" });
+        var (status, result) = await TestDirectAsync(tester, new JsonObject { ["password"] = Password, ["device"] = "Old" }.ToJsonString());
 
         Assert.Equal((int)HttpStatusCode.OK, status);
         Assert.Equal("ok", result.GetProperty("result").GetString());
         Assert.Equal(1, adapter.Connections);
         Assert.Empty(adapter.Frames); // a reachability test connects and sends nothing
-    }
-
-    [Fact]
-    public async Task InvalidPlc_Is400_WithKeyPaths()
-    {
-        await StartAsync();
-
-        var (status, result) = await TestAsync(new JsonObject { ["Protocol"] = "S7", ["Host"] = "", ["Port"] = 70000, ["Extra"] = 1 });
-
-        Assert.Equal(HttpStatusCode.BadRequest, status);
-        Assert.Contains("Edge:Plc:Extra", result.GetRawText());
     }
 
     private async Task StartAsync(int? plcPort = null, bool runAgentServices = false)
@@ -301,7 +370,7 @@ public sealed class PlcConnectionTesterTests : IAsyncDisposable
         {
             ["Edge:EdgeId"] = "plc-test",
             ["Edge:Plc:Host"] = "127.0.0.1",
-            ["Edge:Plc:Port"] = (plcPort ?? ClosedPort()).ToString(System.Globalization.CultureInfo.InvariantCulture),
+            ["Edge:Plc:Port"] = (plcPort ?? ClosedPort()).ToString(CultureInfo.InvariantCulture),
             ["Edge:Plc:TimeoutMs"] = "1000",
             ["Edge:Tags:0:TagId"] = "Line1.Speed",
             ["Edge:Tags:0:Address"] = "DB1.DBW2",
@@ -309,11 +378,11 @@ public sealed class PlcConnectionTesterTests : IAsyncDisposable
             ["Edge:Buffer:Path"] = "data/edge.db",
             ["Edge:Poll:IntervalMs"] = "200",
             ["Edge:Mqtt:Host"] = "127.0.0.1",
-            ["Edge:Mqtt:Port"] = ClosedPort().ToString(System.Globalization.CultureInfo.InvariantCulture),
+            ["Edge:Mqtt:Port"] = ClosedPort().ToString(CultureInfo.InvariantCulture),
             ["Edge:Mqtt:Username"] = "plc-test",
             ["Edge:Mqtt:Password"] = "test-only-password",
             ["Edge:Monitor:Enabled"] = "true",
-            ["Edge:Monitor:Port"] = _port.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            ["Edge:Monitor:Port"] = _port.ToString(CultureInfo.InvariantCulture),
         };
 
         var builder = Host.CreateEmptyApplicationBuilder(new HostApplicationBuilderSettings { ContentRootPath = _contentRoot });
@@ -336,11 +405,56 @@ public sealed class PlcConnectionTesterTests : IAsyncDisposable
         await _outer.StartAsync();
     }
 
-    private async Task<(int Status, JsonElement Body)> TestDirectAsync(PlcConnectionTester tester, JsonObject body)
+    /// <summary>
+    /// A, B and C (an S7-1200 on "LocalHost", an FX5U and an FX3U), each with a driver that answers reachable and counts
+    /// the checks; nothing listens on their ports.
+    /// </summary>
+    private static (EdgeTestHost Edge, Dictionary<string, ReachabilityDriver> Drivers, Dictionary<string, int> Ports) MultiDeviceEdge()
+    {
+        var drivers = new Dictionary<string, ReachabilityDriver> { ["A"] = new(), ["B"] = new(), ["C"] = new() };
+        var ports = new Dictionary<string, int> { ["A"] = ClosedPort(), ["B"] = ClosedPort(), ["C"] = ClosedPort() };
+        var edge = EdgeTestHost.Create(
+            EdgeTestHost.MultiDevice(new Dictionary<string, string?>
+            {
+                ["Edge:Channels:0:Name"] = "S7",
+                ["Edge:Channels:0:Driver"] = "S7",
+                ["Edge:Channels:0:Devices:0:Name"] = "A",
+                ["Edge:Channels:0:Devices:0:Model"] = "S7-1200",
+                ["Edge:Channels:0:Devices:0:Host"] = "LocalHost",
+                ["Edge:Channels:0:Devices:0:Port"] = ports["A"].ToString(CultureInfo.InvariantCulture),
+                ["Edge:Channels:1:Name"] = "Fx5",
+                ["Edge:Channels:1:Driver"] = "Slmp3E",
+                ["Edge:Channels:1:Devices:0:Name"] = "B",
+                ["Edge:Channels:1:Devices:0:Model"] = "FX5U",
+                ["Edge:Channels:1:Devices:0:Host"] = HostOf("B"),
+                ["Edge:Channels:1:Devices:0:Port"] = ports["B"].ToString(CultureInfo.InvariantCulture),
+                ["Edge:Channels:1:Devices:0:TimeoutMs"] = "1000",
+                ["Edge:Channels:2:Name"] = "Fx3",
+                ["Edge:Channels:2:Driver"] = "Mc1E",
+                ["Edge:Channels:2:Devices:0:Name"] = "C",
+                ["Edge:Channels:2:Devices:0:Model"] = "FX3U",
+                ["Edge:Channels:2:Devices:0:Host"] = HostOf("C"),
+                ["Edge:Channels:2:Devices:0:Port"] = ports["C"].ToString(CultureInfo.InvariantCulture),
+                ["Edge:Channels:2:Devices:0:TimeoutMs"] = "1000",
+            }),
+            services => services.AddSingleton<IndustrialIot.Edge.Drivers.IPlcDriverFactory>(
+                new FakeDriverFactory(device => drivers[device.Name])));
+        SettingsPassword.Store(SettingsPassword.PathFor(edge.Services.GetRequiredService<EdgeSettingsFile>().Path), Password);
+        return (edge, drivers, ports);
+    }
+
+    private static string HostOf(string name) => name switch
+    {
+        "B" => "127.0.0.2",
+        "C" => "127.0.0.3",
+        _ => "localhost",
+    };
+
+    private async Task<(int Status, JsonElement Body)> TestDirectAsync(PlcConnectionTester tester, string body)
     {
         var context = new Microsoft.AspNetCore.Http.DefaultHttpContext();
         context.Request.ContentType = "application/json";
-        context.Request.Body = new MemoryStream(Encoding.UTF8.GetBytes(body.ToJsonString()));
+        context.Request.Body = new MemoryStream(Encoding.UTF8.GetBytes(body));
         context.Response.Body = new MemoryStream();
 
         await tester.TestAsync(context, _port);
@@ -372,14 +486,31 @@ public sealed class PlcConnectionTesterTests : IAsyncDisposable
     }
 
     private static JsonObject S7(int port, int timeoutMs = 1000, string host = "127.0.0.1") =>
-        new() { ["Protocol"] = "S7", ["Host"] = host, ["Port"] = port, ["TimeoutMs"] = timeoutMs };
+        With(Proposed("S7", "S7-1200", port, host), "timeoutMs", timeoutMs);
 
-    private static string Body(JsonObject plc, string password) =>
-        new JsonObject { ["password"] = password, ["plc"] = JsonNode.Parse(plc.ToJsonString()) }.ToJsonString();
-
-    private async Task<(HttpStatusCode Status, JsonElement Result)> TestAsync(JsonObject plc, string password = Password)
+    private static JsonObject Proposed(string driver, string model, int? port, string host = "127.0.0.1")
     {
-        using var response = await SendAsync("/api/settings/test-connection", HttpMethod.Post, Body(plc, password));
+        var proposed = new JsonObject { ["driver"] = driver, ["model"] = model, ["host"] = host, ["timeoutMs"] = 1000 };
+        if (port is { } value)
+        {
+            proposed["port"] = value;
+        }
+
+        return proposed;
+    }
+
+    private static JsonObject With(JsonObject node, string key, JsonNode value)
+    {
+        node[key] = value;
+        return node;
+    }
+
+    private static string Body(JsonObject proposed, string password) =>
+        new JsonObject { ["password"] = password, ["proposed"] = JsonNode.Parse(proposed.ToJsonString()) }.ToJsonString();
+
+    private async Task<(HttpStatusCode Status, JsonElement Result)> TestAsync(JsonObject proposed, string password = Password)
+    {
+        using var response = await SendAsync("/api/settings/test-connection", HttpMethod.Post, Body(proposed, password));
         var text = await response.Content.ReadAsStringAsync();
         using var json = JsonDocument.Parse(text.Length == 0 ? "{}" : text);
         return (response.StatusCode, json.RootElement.Clone());

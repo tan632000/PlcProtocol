@@ -45,6 +45,11 @@ public sealed record WriteDecision(bool Allowed, string? Reason, ResolvedTag? Re
 /// </summary>
 public sealed partial class PlcTagCatalog
 {
+    /// <summary>Keys of <see cref="Exception.Data"/> on a catalog error: the refused tag and its field.</summary>
+    internal const string TagIdKey = "TagId";
+
+    internal const string FieldKey = "Field";
+
     private readonly Dictionary<string, ResolvedTag> _tags = new(StringComparer.OrdinalIgnoreCase);
 
     public PlcTagCatalog(PlcTagCatalogOptions options)
@@ -63,7 +68,7 @@ public sealed partial class PlcTagCatalog
             var tag = Resolve(definition, syntax);
             if (!_tags.TryAdd(tag.TagId, tag))
             {
-                throw new InvalidOperationException($"Tag catalog: duplicate tagId '{tag.TagId}' (ids are case-insensitive).");
+                throw Problem($"Tag catalog: duplicate tagId '{tag.TagId}' (ids are case-insensitive).", tag.TagId, "Name");
             }
 
             ordered.Add(tag);
@@ -187,12 +192,12 @@ public sealed partial class PlcTagCatalog
 
         if (definition.TagId is null || !TagIdPattern().IsMatch(definition.TagId))
         {
-            throw Invalid(definition, "tagId must be 1..64 chars [A-Za-z0-9_.-]");
+            throw Invalid(definition, "Name", "tagId must be 1..64 chars [A-Za-z0-9_.-]");
         }
 
         if (definition.DataType == PlcDataType.String ? definition.Length is not > 0 : definition.Length is not null)
         {
-            throw Invalid(definition, definition.DataType == PlcDataType.String
+            throw Invalid(definition, "Length", definition.DataType == PlcDataType.String
                 ? "String tags need Length (characters, at least 1)"
                 : "Length applies to String tags only");
         }
@@ -204,12 +209,12 @@ public sealed partial class PlcTagCatalog
         }
         catch (PlcException ex)
         {
-            throw Invalid(definition, ex.Message, ex);
+            throw Invalid(definition, "Address", ex.Message, ex);
         }
 
         if (definition.Writable && address.ReadOnlyReason is { } readOnlyReason)
         {
-            throw Invalid(definition, readOnlyReason);
+            throw Invalid(definition, "Writable", readOnlyReason);
         }
 
         ValidateBounds(definition);
@@ -227,19 +232,20 @@ public sealed partial class PlcTagCatalog
 
         if (definition.DataType is PlcDataType.Bool or PlcDataType.String or PlcDataType.DTL)
         {
-            throw Invalid(definition, $"Min/Max are not allowed on {definition.DataType} tags");
+            throw Invalid(definition, definition.Min is null ? "Max" : "Min", $"Min/Max are not allowed on {definition.DataType} tags");
         }
 
         if (definition.Min > definition.Max)
         {
-            throw Invalid(definition, "Min must not be greater than Max");
+            throw Invalid(definition, "Min", "Min must not be greater than Max");
         }
 
         // Real's range (±3.4e38) is wider than decimal's (±7.9e28), so only integer types can overflow.
         if (PlcValueConverter.IntegerRange(definition.DataType) is { } range
             && (definition.Min < range.Min || definition.Min > range.Max || definition.Max < range.Min || definition.Max > range.Max))
         {
-            throw Invalid(definition, $"Min/Max must be within the {definition.DataType} range {range.Min}..{range.Max}");
+            var outside = definition.Min < range.Min || definition.Min > range.Max ? "Min" : "Max";
+            throw Invalid(definition, outside, $"Min/Max must be within the {definition.DataType} range {range.Min}..{range.Max}");
         }
     }
 
@@ -254,8 +260,10 @@ public sealed partial class PlcTagCatalog
         foreach (var writable in tags.Where(t => t.Writable))
         {
             var mine = Footprint(writable)
-                ?? throw new InvalidOperationException(
-                    $"Tag catalog: writable tag '{writable.TagId}' has an address the overlap check does not know ({writable.Address.Canonical}).");
+                ?? throw Problem(
+                    $"Tag catalog: writable tag '{writable.TagId}' has an address the overlap check does not know ({writable.Address.Canonical}).",
+                    writable.TagId,
+                    "Address");
 
             foreach (var other in tags)
             {
@@ -265,13 +273,17 @@ public sealed partial class PlcTagCatalog
                 }
 
                 var theirs = Footprint(other)
-                    ?? throw new InvalidOperationException(
-                        $"Tag catalog: tag '{other.TagId}' has an address the overlap check does not know ({other.Address.Canonical}).");
+                    ?? throw Problem(
+                        $"Tag catalog: tag '{other.TagId}' has an address the overlap check does not know ({other.Address.Canonical}).",
+                        other.TagId,
+                        "Address");
 
                 if (mine.Space == theirs.Space && mine.Start < theirs.End && theirs.Start < mine.End)
                 {
-                    throw new InvalidOperationException(
-                        $"Tag catalog: writable tag '{writable.TagId}' ({writable.Address}) overlaps tag '{other.TagId}' ({other.Address}).");
+                    throw Problem(
+                        $"Tag catalog: writable tag '{writable.TagId}' ({writable.Address}) overlaps tag '{other.TagId}' ({other.Address}).",
+                        writable.TagId,
+                        "Address");
                 }
             }
         }
@@ -293,8 +305,21 @@ public sealed partial class PlcTagCatalog
         _ => null,
     };
 
-    private static InvalidOperationException Invalid(PlcTagDefinition definition, string reason, Exception? inner = null) =>
-        new($"Tag catalog: tag '{definition.TagId}' is invalid: {reason}.", inner);
+    private static InvalidOperationException Invalid(PlcTagDefinition definition, string field, string reason, Exception? inner = null) =>
+        Problem($"Tag catalog: tag '{definition.TagId}' is invalid: {reason}.", definition.TagId, field, inner);
+
+    /// <summary>
+    /// A refused tag. The exception stays an <see cref="InvalidOperationException"/> with its message unchanged; its
+    /// <see cref="Exception.Data"/> carries <see cref="TagIdKey"/> and <see cref="FieldKey"/> (<c>Name</c>,
+    /// <c>Address</c>, <c>Length</c>, <c>Writable</c>, <c>Min</c> or <c>Max</c>) so the settings page can pin it to its tag.
+    /// </summary>
+    private static InvalidOperationException Problem(string message, string? tagId, string field, Exception? inner = null)
+    {
+        var problem = new InvalidOperationException(message, inner);
+        problem.Data[TagIdKey] = tagId;
+        problem.Data[FieldKey] = field;
+        return problem;
+    }
 
     // Same rule as the contract tagId, so every catalog tag can appear in telemetry and commands.
     [GeneratedRegex(@"^[A-Za-z0-9_.-]{1,64}\z", RegexOptions.CultureInvariant)]

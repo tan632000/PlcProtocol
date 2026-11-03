@@ -20,25 +20,32 @@
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--bg); color: var(--text);
          font: 14px/1.45 "Segoe UI", system-ui, -apple-system, sans-serif; }
-  main { max-width: 1100px; margin: 0 auto; padding: 20px 16px 40px; }
+  main { max-width: 1200px; margin: 0 auto; padding: 20px 16px 40px; }
   header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 16px; margin-bottom: 16px; }
   h1 { font-size: 20px; margin: 0; }
-  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 0 0 10px; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 0; }
+  h3 { font-size: 14px; margin: 0; }
   a { color: var(--accent); }
   .muted { color: var(--muted); }
+  fieldset#editor { border: 0; margin: 0; padding: 0; min-width: 0; }
   .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 14px; margin-bottom: 14px; }
-  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px 14px; }
+  .channel > .head, .device > .head { display: flex; flex-wrap: wrap; align-items: end; gap: 8px 14px; margin-bottom: 10px; }
+  .device { border: 1px solid var(--border); border-left: 4px solid var(--accent); border-radius: 8px; padding: 12px; margin: 10px 0 10px 12px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px 14px; margin-bottom: 10px; }
   label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+  label.check { flex-direction: row; align-items: center; gap: 6px; color: var(--text); font-size: 13px; }
   input, select { font: inherit; color: var(--text); background: var(--panel); border: 1px solid var(--border);
                   border-radius: 6px; padding: 6px 8px; min-width: 0; }
   input:disabled, select:disabled { background: var(--idle-bg); color: var(--muted); }
+  .invalid, input.invalid, select.invalid { outline: 2px solid var(--bad); outline-offset: 1px; }
+  tr.invalid td { background: var(--bad-bg); }
   .hidden { display: none !important; }
   .table-wrap { overflow-x: auto; }
-  table { width: 100%; border-collapse: collapse; min-width: 720px; }
-  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+  table { width: 100%; border-collapse: collapse; min-width: 900px; }
+  th, td { text-align: left; padding: 5px 6px; border-bottom: 1px solid var(--border); vertical-align: middle; }
   th { background: var(--head); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
   td input, td select { width: 100%; }
-  tr.invalid td { background: var(--bad-bg); }
+  td.narrow { width: 70px; }
   .badge { display: inline-block; padding: 2px 10px; border-radius: 999px; font-weight: 600; font-size: 12px; }
   .ok { color: var(--ok); background: var(--ok-bg); }
   .bad { color: var(--bad); background: var(--bad-bg); }
@@ -47,8 +54,9 @@
   .message { padding: 10px 14px; border-radius: 8px; margin-bottom: 14px; }
   .actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; }
   button { font: inherit; border: 1px solid var(--border); background: var(--panel); color: var(--text);
-           border-radius: 6px; padding: 7px 14px; cursor: pointer; }
+           border-radius: 6px; padding: 6px 12px; cursor: pointer; }
   button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.danger { color: var(--bad); }
   button:disabled { opacity: .5; cursor: not-allowed; }
   ul.errors { margin: 6px 0 0; padding-left: 18px; }
   code { font-family: Consolas, "Cascadia Mono", monospace; }
@@ -69,250 +77,347 @@
     <code>IndustrialIot.Edge.exe set-settings-password --service</code>
     (chạy thử bằng <code>dotnet run</code> thì bỏ <code>--service</code>), rồi tải lại trang.
   </div>
+  <div id="warnings" class="message warn hidden"></div>
+  <div id="commands" class="message idle"></div>
 
-  <section class="panel">
-    <h2>Kết nối PLC</h2>
-    <div id="plcLocked" class="message warn hidden">
-      Đang có tag được phép ghi nên không đổi được PLC (lệnh ghi từ Cloud sẽ rơi sang PLC khác). Xoá các tag đó trước,
-      hoặc người quản trị sửa file settings.
-    </div>
-    <div class="grid">
-      <label>Giao thức
-        <select id="protocol">
-          <option value="S7">Siemens S7</option>
-          <option value="Slmp">Mitsubishi SLMP</option>
-        </select>
-      </label>
-      <label>Địa chỉ PLC (Host)<input id="host" autocomplete="off"></label>
-      <label>Cổng (Port)<input id="port" type="number" min="1" max="65535"></label>
-      <label class="s7only">Rack<input id="rack" type="number" min="0" max="7"></label>
-      <label class="s7only">Slot<input id="slot" type="number" min="0" max="31"></label>
-      <label class="s7only">Loại CPU
-        <select id="cpuType">
-          <option value="S71200">S7-1200</option>
-          <option value="S71500">S7-1500</option>
-        </select>
-      </label>
-      <label>Timeout (ms)<input id="timeoutMs" type="number" min="1" max="60000"></label>
-      <label>Chu kỳ đọc (ms)<input id="intervalMs" type="number" min="100" max="3600000"></label>
-    </div>
-  </section>
+  <fieldset id="editor">
+    <div id="channels"></div>
+    <p class="actions"><button id="addChannel" type="button">+ Thêm channel</button></p>
 
-  <section class="panel">
-    <h2>Danh sách tag</h2>
-    <div class="table-wrap">
-      <table>
-        <thead><tr><th>Tag ID</th><th>Địa chỉ</th><th>Kiểu dữ liệu</th><th>Ghi</th><th></th></tr></thead>
-        <tbody id="tags"></tbody>
-      </table>
-    </div>
-    <p class="actions"><button id="addTag" type="button">+ Thêm tag</button></p>
-    <!-- The DataTypes the Edge knows (PlcDataType) except String, which needs a Length a schema-1 file has no key for;
-         each row's select is a copy of this one. -->
-    <select id="dataTypeChoices" hidden>
-      <option value="Bool">Bool</option>
-      <option value="Byte">Byte</option>
-      <option value="Word">Word</option>
-      <option value="Int">Int</option>
-      <option value="DWord">DWord</option>
-      <option value="DInt">DInt</option>
-      <option value="Real">Real</option>
-      <option value="LReal">LReal</option>
-      <option value="DTL">DTL</option>
-    </select>
-  </section>
-
-  <section class="panel">
-    <div class="actions">
-      <label>Mật khẩu settings<input id="password" type="password" autocomplete="new-password"></label>
-      <button id="validate" type="button">Kiểm tra</button>
-      <button id="test" type="button">Test kết nối</button>
-      <button id="save" type="button" class="primary">Lưu &amp; áp dụng</button>
-      <button id="reload" type="button">Tải lại</button>
-    </div>
-  </section>
+    <section class="panel">
+      <div class="actions">
+        <label>Mật khẩu settings<input id="password" type="password" autocomplete="new-password"></label>
+        <button id="validate" type="button">Kiểm tra</button>
+        <button id="save" type="button" class="primary">Lưu &amp; áp dụng</button>
+        <button id="reload" type="button">Tải lại</button>
+      </div>
+      <p class="muted">Lưu sẽ khởi động lại Edge: mọi PLC ngừng đọc vài giây rồi đọc lại. Nếu cấu hình mới không chạy được,
+        Edge tự quay về cấu hình trước.</p>
+    </section>
+  </fieldset>
 </main>
 
 <script>
   "use strict";
   const $ = (id) => document.getElementById(id);
   const APPLY_WAIT_MS = 60000;
+  // The one data type with a Length (characters); every list of types and models comes from GET /api/settings.
+  const STRING_TYPE = "String";
 
   let current = null;   // the last GET /api/settings
+  let models = [];
   let busy = false;
 
-  function show(text, cls, details) {
+  // ---------- small DOM helpers (text only through textContent/value) ----------
+
+  function make(tag, props, ...children) {
+    const node = document.createElement(tag);
+    for (const [key, value] of Object.entries(props || {})) {
+      if (key === "class") node.className = value;
+      else if (key === "text") node.textContent = value;
+      else node[key] = value;
+    }
+    for (const child of children) if (child != null) node.append(child);
+    return node;
+  }
+
+  function field(caption, control) {
+    return make("label", {}, caption, control);
+  }
+
+  function check(caption, control) {
+    return make("label", { class: "check" }, control, caption);
+  }
+
+  function input(value, props) {
+    // The value last, once the type (number) is set.
+    return make("input", Object.assign({ autocomplete: "off" }, props || {}, { value: value == null ? "" : String(value) }));
+  }
+
+  function button(text, onClick, cls) {
+    const node = make("button", { type: "button", text, class: cls || "" });
+    node.addEventListener("click", () => { if (!busy) onClick(); });
+    return node;
+  }
+
+  function options(select, values, selected) {
+    select.replaceChildren(...values.map((value) => make("option", { value, text: value })));
+    // A value the list does not offer stays as it was (the save names it), never silently changed.
+    if (selected && !values.some((v) => v.toLowerCase() === selected.toLowerCase())) {
+      select.append(make("option", { value: selected, text: selected + " (không hỗ trợ)" }));
+    }
+    if (selected) select.value = values.find((v) => v.toLowerCase() === selected.toLowerCase()) || selected;
+  }
+
+  function text(node) {
+    const value = node.value.trim();
+    return value === "" ? null : value;
+  }
+
+  function number(node) {
+    // A number field holding text it cannot read (e.g. "1,5") reports "": never send that as "not set".
+    if (node.validity && node.validity.badInput) {
+      node.classList.add("invalid");
+      throw new Error("có ô số không đọc được (đánh dấu đỏ); dùng dấu chấm cho số thập phân");
+    }
+    const value = node.value.trim();
+    return value === "" ? null : Number(value);
+  }
+
+  // ---------- models from the Edge ----------
+
+  function drivers() {
+    return [...new Set(models.map((m) => m.driver))];
+  }
+
+  function modelsOf(driver) {
+    return models.filter((m) => m.driver.toLowerCase() === (driver || "").toLowerCase());
+  }
+
+  function modelNamed(name) {
+    return models.find((m) => m.name.toLowerCase() === (name || "").toLowerCase()) || null;
+  }
+
+  // ---------- the tree ----------
+
+  function addChannel(channel) {
+    const name = input(channel ? channel.name : "Channel" + ($("channels").children.length + 1), { placeholder: "VD: Siemens" });
+    const driver = make("select");
+    options(driver, drivers(), channel ? channel.driver : drivers()[0]);
+    const devices = make("div");
+
+    const node = make("section", { class: "panel channel" },
+      make("div", { class: "head" },
+        make("h2", { text: "Channel" }),
+        field("Tên channel", name),
+        field("Driver", driver),
+        button("+ Thêm PLC", () => addDevice(node, null)),
+        button("Xoá channel", () => node.remove(), "danger")),
+      devices);
+    node.fields = { Name: name, Driver: driver };
+    node.devices = devices;
+    node.collect = () => ({
+      Name: text(name),
+      Driver: driver.value,
+      Devices: [...devices.children].map((d) => d.collect()),
+    });
+    driver.addEventListener("change", () => {
+      for (const device of devices.children) device.driverChanged();
+    });
+
+    $("channels").append(node);
+    for (const device of (channel && channel.devices) || []) addDevice(node, device);
+    if (!channel) addDevice(node, null);
+    return node;
+  }
+
+  function addDevice(channelNode, device) {
+    const driverOf = () => channelNode.fields.Driver.value;
+    // Device names are unique across the Edge, so a new one is numbered over every channel.
+    const name = input(device ? device.name : "Plc" + (document.querySelectorAll(".device").length + 1), { placeholder: "VD: Line1" });
+    const model = make("select");
+    const host = input(device && device.host, { placeholder: "VD: 192.168.0.10" });
+    const port = input(device && device.port, { type: "number", min: 1, max: 65535 });
+    const rack = input(device && device.rack, { type: "number", min: 0, max: 7 });
+    const slot = input(device && device.slot, { type: "number", min: 0, max: 31 });
+    const timeoutMs = input(device ? device.timeoutMs : 3000, { type: "number", min: 1, max: 60000 });
+    const pollIntervalMs = input(device ? device.pollIntervalMs : 1000, { type: "number", min: 100, max: 3600000 });
+    const enabled = make("input", { type: "checkbox", checked: device ? device.enabled : true });
+    const writesEnabled = make("input", { type: "checkbox", checked: !!(device && device.writesEnabled) });
+    const legacyTagIds = !!(device && device.legacyTagIds);
+    const writesNote = make("span", { class: "muted hidden", text: "Dòng PLC này chưa cho phép ghi." });
+    const rackLabel = field("Rack", rack);
+    const slotLabel = field("Slot", slot);
+    const portHint = make("span", { class: "muted" });
+    const tags = make("tbody");
+    const csvFile = make("input", { type: "file", accept: ".csv,text/csv", class: "hidden" });
+
+    const node = make("div", { class: "device" });
+    const title = make("h3");
+    const refreshTitle = () => { title.textContent = "PLC " + (name.value || "(chưa đặt tên)") + " · " + (model.value || ""); };
+
+    function applyModel(fillDefaults) {
+      const chosen = modelNamed(model.value);
+      const hasRack = !!chosen && chosen.defaultRack != null;
+      rackLabel.classList.toggle("hidden", !hasRack);
+      slotLabel.classList.toggle("hidden", !hasRack);
+      port.placeholder = chosen && chosen.defaultPort != null ? String(chosen.defaultPort) : "";
+      portHint.textContent = chosen && chosen.portHint ? "Port: " + chosen.portHint : "";
+      if (chosen && fillDefaults) {
+        port.value = chosen.defaultPort == null ? "" : String(chosen.defaultPort);
+        rack.value = chosen.defaultRack == null ? "" : String(chosen.defaultRack);
+        slot.value = chosen.defaultSlot == null ? "" : String(chosen.defaultSlot);
+      }
+      if (!hasRack) { rack.value = ""; slot.value = ""; }
+      const writesAllowed = !chosen || chosen.writesAllowed;
+      // Turning writes on is refused for such a model; turning them off stays possible.
+      writesEnabled.disabled = !writesAllowed && !writesEnabled.checked;
+      writesNote.classList.toggle("hidden", writesAllowed);
+      for (const row of tags.children) row.modelChanged(chosen, writesAllowed);
+      refreshTitle();
+    }
+
+    node.driverChanged = () => {
+      const keep = modelsOf(driverOf()).some((m) => m.name === model.value);
+      options(model, modelsOf(driverOf()).map((m) => m.name), keep ? model.value : null);
+      applyModel(!keep);
+    };
+
+    function addTag(tag) {
+      const chosen = modelNamed(model.value);
+      const types = chosen ? chosen.dataTypes : [];
+      const tagName = input(tag && tag.name, { placeholder: "VD: Speed" });
+      const address = input(tag && tag.address, { placeholder: "VD: DB1.DBW2 hoặc D100" });
+      const dataType = make("select");
+      options(dataType, types, tag ? tag.dataType : types[0]);
+      const length = input(tag && tag.length, { type: "number", min: 1, max: 256 });
+      const writable = make("input", { type: "checkbox", checked: !!(tag && tag.writable) });
+      const min = input(tag && tag.min, { type: "number", step: "any" });
+      const max = input(tag && tag.max, { type: "number", step: "any" });
+      const description = input(tag && tag.description, { placeholder: "Mô tả (tuỳ chọn)", maxLength: 256 });
+      const row = make("tr");
+      const lengthState = () => { length.disabled = dataType.value !== STRING_TYPE; if (length.disabled) length.value = ""; };
+      dataType.addEventListener("change", lengthState);
+      writable.addEventListener("change", () => {
+        const current = modelNamed(model.value);
+        writable.disabled = !!current && !current.writesAllowed && !writable.checked;
+      });
+      lengthState();
+      row.fields = { Name: tagName, Address: address, DataType: dataType, Length: length, Writable: writable, Min: min, Max: max, Description: description };
+      row.modelChanged = (next, writesAllowed) => {
+        options(dataType, next ? next.dataTypes : [], dataType.value);
+        lengthState();
+        writable.disabled = !writesAllowed && !writable.checked;
+      };
+      row.collect = () => ({
+        Name: text(tagName),
+        Address: text(address),
+        DataType: dataType.value || null,
+        Length: number(length),
+        Writable: writable.checked,
+        Min: number(min),
+        Max: number(max),
+        Description: description.value.trim() === "" ? null : description.value,
+      });
+      const cell = (control, cls) => make("td", { class: cls || "" }, control);
+      row.append(cell(tagName), cell(address), cell(dataType), cell(length, "narrow"), cell(writable, "narrow"),
+        cell(min, "narrow"), cell(max, "narrow"), cell(description), cell(button("Xoá", () => row.remove(), "danger")));
+      writable.disabled = chosen && !chosen.writesAllowed && !writable.checked;
+      tags.append(row);
+    }
+
+    node.fields = { Name: name, Model: model, Host: host, Port: port, Rack: rack, Slot: slot, TimeoutMs: timeoutMs,
+      PollIntervalMs: pollIntervalMs, Enabled: enabled, WritesEnabled: writesEnabled };
+    node.tags = tags;
+    node.connection = () => ({
+      driver: driverOf(), model: model.value || null, host: text(host), port: number(port),
+      rack: number(rack), slot: number(slot), timeoutMs: number(timeoutMs),
+    });
+    node.tagList = () => [...tags.children].map((row) => row.collect());
+    node.collect = () => ({
+      Name: text(name), Model: model.value || null, Host: text(host), Port: number(port), Rack: number(rack),
+      Slot: number(slot), TimeoutMs: number(timeoutMs), PollIntervalMs: number(pollIntervalMs), Enabled: enabled.checked,
+      WritesEnabled: writesEnabled.checked, LegacyTagIds: legacyTagIds, Tags: node.tagList(),
+    });
+    // A device as loaded is tested by name (the Edge uses its running driver); once edited, as proposed.
+    const savedName = device ? device.name : null;
+    const savedConnection = () => device ? JSON.stringify(node.connection()) : null;
+    let loaded = null;
+    node.isSaved = () => savedName !== null && text(name) === savedName && JSON.stringify(node.connection()) === loaded;
+
+    model.addEventListener("change", () => applyModel(true));
+    name.addEventListener("input", refreshTitle);
+    writesEnabled.addEventListener("change", () => applyModel(false));
+    csvFile.addEventListener("change", () => { if (csvFile.files.length) importCsv(node, csvFile.files[0], addTag); csvFile.value = ""; });
+
+    node.append(
+      make("div", { class: "head" },
+        title,
+        legacyTagIds ? make("span", { class: "badge idle", text: "TagId giữ nguyên tên cũ" }) : null,
+        button("Test kết nối", () => testConnection(node)),
+        button("Xuất CSV", () => exportCsv(node)),
+        button("Nhập CSV", () => csvFile.click()),
+        csvFile,
+        button("Xoá PLC", () => node.remove(), "danger")),
+      make("div", { class: "grid" },
+        field("Tên PLC", name), field("Dòng PLC", model), field("Địa chỉ (Host)", host), field("Cổng (Port)", port),
+        rackLabel, slotLabel, field("Timeout (ms)", timeoutMs), field("Chu kỳ đọc (ms)", pollIntervalMs)),
+      make("div", { class: "actions" }, check("Đang dùng", enabled), check("Cho phép ghi", writesEnabled), writesNote, portHint),
+      make("div", { class: "table-wrap" },
+        make("table", {},
+          make("thead", {}, make("tr", {}, ...["Tên tag", "Địa chỉ", "Kiểu dữ liệu", "Độ dài", "Ghi", "Min", "Max", "Mô tả", ""]
+            .map((caption) => make("th", { text: caption })))),
+          tags)),
+      make("p", { class: "actions" }, button("+ Thêm tag", () => addTag(null))));
+
+    channelNode.devices.append(node);
+    const choices = modelsOf(driverOf()).map((m) => m.name);
+    options(model, choices, device ? device.model : choices[0]);
+    for (const tag of (device && device.tags) || []) addTag(tag);
+    applyModel(!device);
+    loaded = savedConnection();
+    if (!device) addTag(null);
+  }
+
+  function collectSettings() {
+    return { Channels: [...$("channels").children].map((c) => c.collect()) };
+  }
+
+  // ---------- errors pinned to their node ----------
+
+  function clearMarks() {
+    for (const node of document.querySelectorAll(".invalid")) node.classList.remove("invalid");
+  }
+
+  /** The node an error path names (Edge:Channels:c[:Devices:d[:Tags:t]][:Field]) and a label for it. */
+  function locate(path) {
+    const match = /^Edge:Channels:(\d+)(?::Devices:(\d+)(?::Tags:(\d+))?)?(?::([A-Za-z]+))?$/.exec(path || "");
+    if (!match) return { label: path || "Cấu hình", target: null };
+    const channel = $("channels").children[Number(match[1])];
+    let label = "Channel " + (channel ? channel.fields.Name.value : Number(match[1]) + 1);
+    let node = channel || null;
+    if (channel && match[2] !== undefined) {
+      const device = channel.devices.children[Number(match[2])];
+      label += " › PLC " + (device ? device.fields.Name.value : Number(match[2]) + 1);
+      node = device || null;
+      if (device && match[3] !== undefined) {
+        const row = device.tags.children[Number(match[3])];
+        label += " › tag dòng " + (Number(match[3]) + 1) + (row && row.fields.Name.value ? " (" + row.fields.Name.value + ")" : "");
+        node = row || null;
+      }
+    }
+    const fieldName = match[4];
+    const target = node && fieldName && node.fields && node.fields[fieldName] ? node.fields[fieldName] : node;
+    return { label, target };
+  }
+
+  function showErrors(heading, errors) {
+    clearMarks();
+    const lines = errors.map((e) => {
+      const { label, target } = locate(e.path);
+      if (target) target.classList.add("invalid");
+      return label + ": " + e.message;
+    });
+    show(heading, "bad", lines);
+  }
+
+  // ---------- requests ----------
+
+  function show(message, cls, details) {
     const box = $("message");
     box.className = "message " + cls;
-    box.textContent = text;
+    box.textContent = message;
     if (details && details.length) {
-      const list = document.createElement("ul");
-      list.className = "errors";
-      for (const line of details) {
-        const item = document.createElement("li");
-        item.textContent = line;
-        list.appendChild(item);
-      }
-      box.appendChild(list);
+      box.append(make("ul", { class: "errors" }, ...details.map((line) => make("li", { text: line }))));
     }
   }
 
   function setBusy(value) {
     busy = value;
-    const passwordSet = current && current.passwordSet;
-    $("save").disabled = value || !passwordSet;
-    $("test").disabled = value || !passwordSet;
-    $("validate").disabled = value;
-    $("reload").disabled = value;
-    // Edits made while a save is applying would be overwritten by the reload that follows.
-    $("addTag").disabled = value;
-    for (const el of $("tags").querySelectorAll("input, select, button")) {
-      el.disabled = value || el.dataset.locked === "true";
-    }
-  }
-
-  function writableKept() {
-    return [...$("tags").children].some((tr) => tr.dataset.writable === "true");
-  }
-
-  function applyLocks() {
-    const locked = writableKept();
-    for (const id of ["protocol", "host", "port", "rack", "slot", "cpuType"]) $(id).disabled = locked;
-    $("plcLocked").classList.toggle("hidden", !locked);
-    const s7 = $("protocol").value === "S7";
-    for (const el of document.querySelectorAll(".s7only")) el.classList.toggle("hidden", !s7);
-  }
-
-  function input(value, placeholder) {
-    const el = document.createElement("input");
-    el.value = value == null ? "" : String(value);
-    el.placeholder = placeholder;
-    el.autocomplete = "off";
-    return el;
-  }
-
-  function addRow(tag) {
-    const tr = document.createElement("tr");
-    const writable = !!(tag && tag.writable);
-    tr.dataset.writable = String(writable);
-    // Min/Max go back exactly as received: a writable tag stays writable only when sent back unchanged.
-    tr.dataset.min = tag && tag.min != null ? String(tag.min) : "";
-    tr.dataset.max = tag && tag.max != null ? String(tag.max) : "";
-
-    const tagId = input(tag && tag.tagId, "VD: Line1.Speed");
-    const address = input(tag && tag.address, "VD: DB1.DBW2 hoặc D100");
-    const dataType = $("dataTypeChoices").cloneNode(true);
-    dataType.removeAttribute("id");
-    dataType.hidden = false;
-    dataType.value = (tag && tag.dataType) || "Int";
-
-    const cells = [tagId, address, dataType].map((el) => {
-      const td = document.createElement("td");
-      if (writable) {
-        el.disabled = true;
-        el.dataset.locked = "true";
-      }
-      td.appendChild(el);
-      return td;
-    });
-
-    const writeCell = document.createElement("td");
-    const badge = document.createElement("span");
-    badge.className = "badge " + (writable ? "warn" : "idle");
-    badge.textContent = writable ? "Được ghi" : "Chỉ đọc";
-    writeCell.appendChild(badge);
-    if (writable) {
-      const hint = document.createElement("div");
-      hint.className = "muted";
-      hint.textContent = "Chỉ xoá được; sửa trong file settings với quyền Admin.";
-      writeCell.appendChild(hint);
-    }
-
-    const removeCell = document.createElement("td");
-    const remove = document.createElement("button");
-    remove.type = "button";
-    remove.textContent = "Xoá";
-    remove.addEventListener("click", () => { tr.remove(); applyLocks(); });
-    removeCell.appendChild(remove);
-
-    tr.append(...cells, writeCell, removeCell);
-    $("tags").appendChild(tr);
-  }
-
-  function fill(settings) {
-    const plc = settings.plc;
-    $("protocol").value = plc.protocol;
-    $("host").value = plc.host || "";
-    $("port").value = plc.port == null ? "" : plc.port;
-    $("rack").value = plc.rack == null ? "" : plc.rack;
-    $("slot").value = plc.slot == null ? "" : plc.slot;
-    $("cpuType").value = plc.cpuType || "S71200";
-    $("timeoutMs").value = plc.timeoutMs;
-    $("intervalMs").value = settings.poll.intervalMs;
-    $("tags").replaceChildren();
-    for (const tag of settings.tags) addRow(tag);
-    applyLocks();
-  }
-
-  function number(id) {
-    const text = $(id).value.trim();
-    return text === "" ? undefined : Number(text);
-  }
-
-  function collectPlc() {
-    // Locked by kept writable tags: send the running PLC back exactly as GET returned it (the server compares it).
-    if (writableKept() && current) {
-      const p = current.settings.plc;
-      const locked = { Protocol: p.protocol, Host: p.host, Port: p.port, TimeoutMs: number("timeoutMs") };
-      if (p.protocol === "S7") Object.assign(locked, { Rack: p.rack, Slot: p.slot, CpuType: p.cpuType });
-      for (const key of Object.keys(locked)) if (locked[key] === undefined || locked[key] === null) delete locked[key];
-      return locked;
-    }
-
-    const plc = { Protocol: $("protocol").value, Host: $("host").value.trim(), Port: number("port"), TimeoutMs: number("timeoutMs") };
-    if (plc.Protocol === "S7") {
-      plc.Rack = number("rack");
-      plc.Slot = number("slot");
-      plc.CpuType = $("cpuType").value;
-    }
-    for (const key of Object.keys(plc)) if (plc[key] === undefined) delete plc[key];
-    return plc;
-  }
-
-  function collectSettings() {
-    const tags = [...$("tags").children].map((tr) => {
-      const [tagId, address, dataType] = tr.querySelectorAll("input, select");
-      const tag = { TagId: tagId.value.trim(), Address: address.value.trim(), DataType: dataType.value, Writable: false };
-      if (tr.dataset.min !== "") tag.Min = Number(tr.dataset.min);
-      if (tr.dataset.max !== "") tag.Max = Number(tr.dataset.max);
-      return tag;
-    });
-    const poll = {};
-    if (number("intervalMs") !== undefined) poll.IntervalMs = number("intervalMs");
-    return { Plc: collectPlc(), Poll: poll, Tags: tags };
-  }
-
-  function takePassword() {
-    const value = $("password").value;
-    $("password").value = "";
-    return value;
-  }
-
-  function markRows(errors) {
-    const rows = [...$("tags").children];
-    for (const tr of rows) tr.classList.remove("invalid");
-    for (const e of errors) {
-      const match = /^Edge:Tags:(\d+)/.exec(e.path || "");
-      if (match && rows[Number(match[1])]) rows[Number(match[1])].classList.add("invalid");
-    }
-  }
-
-  function errorLines(errors) {
-    return errors.map((e) => {
-      const match = /^Edge:Tags:(\d+)/.exec(e.path || "");
-      const where = match ? `Tag dòng ${Number(match[1]) + 1}` : (e.path || "Cấu hình");
-      return `${where}: ${e.message}`;
-    });
+    // A disabled fieldset disables every control inside it and keeps each one's own state for later.
+    $("editor").disabled = value;
+    const passwordSet = !!(current && current.passwordSet);
+    $("save").disabled = !passwordSet;
   }
 
   async function send(path, method, body, timeoutMs) {
@@ -334,24 +439,6 @@
     }
   }
 
-  function explain(status, json) {
-    switch (status) {
-      case 401: return ["Sai mật khẩu settings.", "bad"];
-      case 403: return json.error === "password-not-set"
-        ? ["Chưa đặt mật khẩu settings (xem hướng dẫn phía trên).", "warn"]
-        : ["Yêu cầu bị từ chối: chỉ gửi được từ chính trang này trên máy Edge.", "bad"];
-      case 409: return json.error === "stale-revision"
-        ? ["Cấu hình đã bị thay đổi ở nơi khác. Bấm “Tải lại” để lấy bản mới rồi sửa lại.", "warn"]
-        : ["Đang có một lần lưu hoặc test khác chạy. Thử lại sau giây lát.", "warn"];
-      case 413: return ["Cấu hình quá lớn (tối đa 1 MB).", "bad"];
-      case 415: return ["Yêu cầu không đúng định dạng.", "bad"];
-      case 429: return json.retryAfterSeconds
-        ? [`Nhập sai mật khẩu quá nhiều lần. Thử lại sau ${json.retryAfterSeconds} giây.`, "bad"]
-        : ["Đã test quá 10 lần trong một phút. Đợi một chút rồi thử lại.", "warn"];
-      default: return [`Lỗi không mong đợi (HTTP ${status}).`, "bad"];
-    }
-  }
-
   async function getJson(path) {
     const abort = new AbortController();
     const timer = setTimeout(() => abort.abort(), 5000);
@@ -364,18 +451,69 @@
     }
   }
 
+  function explain(status, json) {
+    switch (status) {
+      case 401: return ["Sai mật khẩu settings.", "bad"];
+      case 403: return json.error === "password-not-set"
+        ? ["Chưa đặt mật khẩu settings (xem hướng dẫn phía trên).", "warn"]
+        : ["Yêu cầu bị từ chối: chỉ gửi được từ chính trang này trên máy Edge.", "bad"];
+      case 409:
+        if (json.error === "stale-revision") return ["Cấu hình đã bị thay đổi ở nơi khác. Bấm “Tải lại” để lấy bản mới rồi sửa lại.", "warn"];
+        if (json.error === "endpoint-in-use") return ["Một PLC đang chạy dùng địa chỉ và cổng này với thông số khác: lưu trước rồi test.", "warn"];
+        return ["Đang có một lần lưu hoặc test khác chạy. Thử lại sau giây lát.", "warn"];
+      case 413: return ["Dữ liệu quá lớn (cấu hình tối đa 4 MB).", "bad"];
+      case 415: return ["Yêu cầu không đúng định dạng.", "bad"];
+      case 429: return json.retryAfterSeconds
+        ? [`Nhập sai mật khẩu quá nhiều lần. Thử lại sau ${json.retryAfterSeconds} giây.`, "bad"]
+        : ["Đã test quá 10 lần trong một phút. Đợi một chút rồi thử lại.", "warn"];
+      default: return [`Lỗi không mong đợi (HTTP ${status}).`, "bad"];
+    }
+  }
+
+  function needPassword() {
+    // An empty password would count as a wrong one toward the lockout: never send it.
+    if ($("password").value !== "") return false;
+    show("Nhập mật khẩu settings trước.", "warn");
+    $("password").focus();
+    return true;
+  }
+
+  function takePassword() {
+    const value = $("password").value;
+    $("password").value = "";
+    return value;
+  }
+
+  function fill(response) {
+    models = response.models || [];
+    $("channels").replaceChildren();
+    for (const channel of response.settings.channels || []) addChannel(channel);
+
+    const warnings = response.warnings || [];
+    $("warnings").classList.toggle("hidden", warnings.length === 0);
+    $("warnings").replaceChildren(...warnings.map((code) => make("div", {
+      text: code === "cpuType-not-kept"
+        ? "PLC Siemens của Edge này khai báo một loại CPU khác mặc định (CpuType). Cấu hình nhiều PLC không lưu loại CPU: sau khi lưu, Edge kết nối theo mặc định của dòng PLC đã chọn."
+        : code,
+    })));
+
+    $("commands").textContent = "Công tắc ghi chung của Edge (Edge:Commands:Enabled) đang "
+      + (response.commandsEnabled ? "BẬT" : "TẮT")
+      + ". Lệnh ghi từ Cloud chỉ tới PLC khi công tắc này bật, PLC bật “Cho phép ghi” và tag bật “Ghi”. Công tắc này đổi trong appsettings.json, không đổi ở trang này.";
+  }
+
   /** Loads the settings; returns false (and says why) when it could not. */
   async function load() {
     setBusy(true);
     show("Đang tải cấu hình…", "idle");
     try {
       current = await getJson("/api/settings");
-      fill(current.settings);
+      fill(current);
       $("source").textContent = current.source === "file"
         ? "Đang dùng file settings đã lưu"
         : "Chưa có file settings (đang dùng appsettings.json)";
       $("noPassword").classList.toggle("hidden", current.passwordSet);
-      show("Sửa cấu hình rồi bấm “Lưu & áp dụng”. Edge sẽ khởi động lại (đọc PLC, gửi Cloud và trang này) trong vài giây.", "idle");
+      show("Sửa cấu hình rồi bấm “Lưu & áp dụng”.", "idle");
       return true;
     } catch (err) {
       show("Không tải được cấu hình (" + err.message + "). Phần mềm Edge có đang chạy không?", "bad");
@@ -390,9 +528,9 @@
     try {
       const { status, json } = await send("/api/settings/validate", "POST", { settings: collectSettings() });
       if (status !== 200) return show(...explain(status, json));
-      markRows(json.errors);
+      clearMarks();
       if (json.ok) show("Cấu hình hợp lệ.", "ok");
-      else show("Cấu hình chưa hợp lệ:", "bad", errorLines(json.errors));
+      else showErrors("Cấu hình chưa hợp lệ:", json.errors || []);
     } catch (err) {
       show("Không kiểm tra được (" + err.message + ").", "bad");
     } finally {
@@ -414,29 +552,25 @@
     return null;
   }
 
-  function needPassword() {
-    // An empty password would count as a wrong one toward the lockout: never send it.
-    if ($("password").value !== "") return false;
-    show("Nhập mật khẩu settings trước.", "warn");
-    $("password").focus();
-    return true;
-  }
-
   async function save() {
     if (needPassword()) return;
+    // Read the tree before taking the password, so an unreadable field does not cost the typed password.
+    let settings;
+    try {
+      settings = collectSettings();
+    } catch (err) {
+      return show("Không lưu được (" + err.message + ").", "bad");
+    }
     const password = takePassword();
     setBusy(true);
     try {
       const { status, json } = await send("/api/settings", "PUT",
-        { revision: current.revision, password, settings: collectSettings() });
-      if (status === 400) {
-        markRows(json.errors || []);
-        return show("Không lưu: cấu hình chưa hợp lệ.", "bad", errorLines(json.errors || []));
-      }
+        { revision: current.revision, password, settings });
+      if (status === 400) return showErrors("Không lưu: cấu hình chưa hợp lệ.", json.errors || []);
       if (status !== 202) return show(...explain(status, json));
 
-      markRows([]);
-      show("Đã lưu. Edge đang áp dụng cấu hình mới…", "warn");
+      clearMarks();
+      show("Đã lưu. Edge đang áp dụng cấu hình mới (mọi PLC ngừng đọc vài giây)…", "warn");
       const apply = await waitForApply(json.applyId);
       if (apply === null) {
         show("Chưa thấy Edge áp dụng xong sau 60 giây. Kiểm tra trang giám sát hoặc log của Edge.", "bad");
@@ -452,16 +586,22 @@
     }
   }
 
-  async function testConnection() {
+  async function testConnection(device) {
     if (needPassword()) return;
+    let connection;
+    try {
+      connection = device.connection();
+    } catch (err) {
+      return show("Không test được (" + err.message + ").", "bad");
+    }
     const password = takePassword();
-    const plc = collectPlc();
+    const body = device.isSaved() ? { password, device: device.fields.Name.value.trim() } : { password, proposed: connection };
     setBusy(true);
-    show(`Đang test kết nối ${plc.Host}:${plc.Port || ""}…`, "idle");
+    show(`Đang test kết nối ${connection.host || ""}:${connection.port || ""}…`, "idle");
     try {
       // The Edge waits up to the PLC timeout; give the request a little more.
-      const { status, json } = await send("/api/settings/test-connection", "POST", { password, plc }, (plc.TimeoutMs || 3000) + 5000);
-      if (status === 400) return show("Thông số PLC chưa hợp lệ:", "bad", errorLines(json.errors || []));
+      const { status, json } = await send("/api/settings/test-connection", "POST", body, (connection.timeoutMs || 3000) + 5000);
+      if (status === 400) return show("Thông số PLC chưa hợp lệ:", "bad", (json.errors || []).map((e) => e.path + ": " + e.message));
       if (status !== 200) return show(...explain(status, json));
       if (json.result === "ok") show(`Kết nối được tới PLC (${json.elapsedMs} ms).`, "ok");
       else show(`Không kết nối được tới PLC (${json.elapsedMs} ms). Kiểm tra địa chỉ, cổng, dây mạng và PLC.`, "bad");
@@ -472,11 +612,47 @@
     }
   }
 
-  $("protocol").addEventListener("change", applyLocks);
-  $("addTag").addEventListener("click", () => addRow(null));
+  async function exportCsv(device) {
+    setBusy(true);
+    try {
+      const { status, json } = await send("/api/settings/csv/format", "POST", { tags: device.tagList() });
+      if (status !== 200) return show(...explain(status, json));
+      // A BOM first, or Excel opens the UTF-8 file as ANSI and garbles Vietnamese descriptions.
+      const url = URL.createObjectURL(new Blob(["\uFEFF", json.csv], { type: "text/csv;charset=utf-8" }));
+      const link = make("a", { href: url, download: (device.fields.Name.value.trim() || "plc") + "-tags.csv" });
+      document.body.append(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      show("Đã xuất danh sách tag ra file CSV.", "ok");
+    } catch (err) {
+      show("Không xuất được CSV (" + err.message + ").", "bad");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function importCsv(device, file, addTag) {
+    setBusy(true);
+    try {
+      const { status, json } = await send("/api/settings/csv/parse", "POST", { csv: await file.text() });
+      if (status === 400 && json.errors) {
+        return show("File CSV không nhập được:", "bad", json.errors.map((e) => `dòng ${e.line}, cột ${e.column}: ${e.message}`));
+      }
+      if (status !== 200) return show(...explain(status, json));
+      device.tags.replaceChildren();
+      for (const tag of json.tags) addTag(tag);
+      show(`Đã nhập ${json.tags.length} tag cho PLC ${device.fields.Name.value}. Bấm “Kiểm tra” hoặc “Lưu & áp dụng” để áp dụng.`, "ok");
+    } catch (err) {
+      show("Không nhập được CSV (" + err.message + ").", "bad");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  $("addChannel").addEventListener("click", () => { if (!busy) addChannel(null); });
   $("validate").addEventListener("click", () => { if (!busy) validate(); });
   $("save").addEventListener("click", () => { if (!busy) save(); });
-  $("test").addEventListener("click", () => { if (!busy) testConnection(); });
   $("reload").addEventListener("click", () => { if (!busy) load(); });
   load();
 </script>

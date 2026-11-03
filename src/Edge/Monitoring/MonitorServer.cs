@@ -111,6 +111,8 @@ internal sealed class MonitorServer(
             app.MapGet("/api/settings", (RequestDelegate)settingsApi.GetAsync);
             app.MapPost("/api/settings/validate", (RequestDelegate)(context => settingsApi.ValidateAsync(context, port)));
             app.MapPut("/api/settings", (RequestDelegate)(context => settingsApi.SaveAsync(context, port)));
+            app.MapPost("/api/settings/csv/format", (RequestDelegate)(context => TagCsv.FormatAsync(context, port)));
+            app.MapPost("/api/settings/csv/parse", (RequestDelegate)(context => TagCsv.ParseAsync(context, port)));
         }
 
         if (connectionTester is not null)

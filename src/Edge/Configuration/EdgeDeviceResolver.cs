@@ -70,33 +70,36 @@ public static class EdgeDeviceResolver
         foreach (var channel in options.Channels)
         {
             EdgeChannelsValidator.TryParseDriver(channel.Driver, out var driver);
-            foreach (var device in channel.Devices)
-            {
-                var tags = device.Tags.Select(tag =>
-                {
-                    EdgeChannelsValidator.TryParseDataType(tag.DataType, out var dataType);
-                    return new PlcTagDefinition
-                    {
-                        TagId = EdgeChannelsValidator.PublishedTagId(device, tag),
-                        Address = tag.Address,
-                        DataType = dataType,
-                        Writable = tag.Writable,
-                        Min = tag.Min,
-                        Max = tag.Max,
-                        Length = tag.Length,
-                        Name = tag.Name,
-                        Description = tag.Description,
-                    };
-                }).ToArray();
-
-                devices.Add(new ResolvedDevice(
-                    channel.Name, driver, device.Name, device.Model, device.Host.Trim(), device.Port, device.Rack, device.Slot,
-                    CpuType: null, device.TimeoutMs, device.PollIntervalMs, device.Enabled, device.WritesEnabled,
-                    device.LegacyTagIds, tags));
-            }
+            devices.AddRange(channel.Devices.Select(device => ToDevice(channel, driver, device)));
         }
 
         return new EdgeDeviceSet(devices, MigratedFromV1: false);
+    }
+
+    /// <summary>One configured device as the Edge runs it; the settings API checks proposed devices through it too.</summary>
+    internal static ResolvedDevice ToDevice(ChannelOptions channel, PlcDriverKind driver, DeviceOptions device)
+    {
+        var tags = device.Tags.Select(tag =>
+        {
+            EdgeChannelsValidator.TryParseDataType(tag.DataType, out var dataType);
+            return new PlcTagDefinition
+            {
+                TagId = EdgeChannelsValidator.PublishedTagId(device, tag),
+                Address = tag.Address,
+                DataType = dataType,
+                Writable = tag.Writable,
+                Min = tag.Min,
+                Max = tag.Max,
+                Length = tag.Length,
+                Name = tag.Name,
+                Description = tag.Description,
+            };
+        }).ToArray();
+
+        return new ResolvedDevice(
+            channel.Name, driver, device.Name, device.Model, device.Host.Trim(), device.Port, device.Rack, device.Slot,
+            CpuType: null, device.TimeoutMs, device.PollIntervalMs, device.Enabled, device.WritesEnabled,
+            device.LegacyTagIds, tags);
     }
 
     /// <summary>

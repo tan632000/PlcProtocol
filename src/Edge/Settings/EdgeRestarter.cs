@@ -19,8 +19,14 @@ public enum ApplyState
 /// </summary>
 public sealed record ApplyStatus(string Revision, string? ApplyId, ApplyState State, string? Error);
 
-/// <summary>An accepted save: the new settings file bytes, or null to delete the file (back to appsettings).</summary>
-public sealed record ApplyRequest(string ApplyId, byte[]? Bytes);
+/// <summary>
+/// An accepted save: the new settings file bytes, or null to delete the file (back to appsettings), and the write
+/// permissions it changes, logged only once the new settings run.
+/// </summary>
+public sealed record ApplyRequest(string ApplyId, byte[]? Bytes, IReadOnlyList<WriteChange>? WriteChanges = null);
+
+/// <summary>A device's <c>WritesEnabled</c> or a TagId's effective write permission (device and tag) before and after a save.</summary>
+public sealed record WriteChange(string Subject, string Name, bool Before, bool After);
 
 /// <summary>
 /// Hand-off between the settings API and <see cref="EdgeSupervisor"/>, shared by every inner host. A request only
@@ -57,9 +63,12 @@ public sealed class EdgeRestarter
         }
     }
 
-    /// <summary>Queues an apply of <paramref name="bytes"/> (null deletes the settings file).</summary>
+    /// <summary>
+    /// Queues an apply of <paramref name="bytes"/> (null deletes the settings file); <paramref name="writeChanges"/> are
+    /// logged when it applies.
+    /// </summary>
     /// <returns>False when another apply is queued or running.</returns>
-    public bool TryRequest(byte[]? bytes, out string applyId)
+    public bool TryRequest(byte[]? bytes, out string applyId, IReadOnlyList<WriteChange>? writeChanges = null)
     {
         lock (_gate)
         {
@@ -70,7 +79,7 @@ public sealed class EdgeRestarter
             }
 
             applyId = Guid.NewGuid().ToString("N");
-            _pending = new Pending(new ApplyRequest(applyId, bytes is null ? null : (byte[])bytes.Clone()));
+            _pending = new Pending(new ApplyRequest(applyId, bytes is null ? null : (byte[])bytes.Clone(), writeChanges));
             _status = _status with { ApplyId = applyId, State = ApplyState.Applying, Error = null };
         }
 

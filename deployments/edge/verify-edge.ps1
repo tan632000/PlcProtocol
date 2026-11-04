@@ -8,7 +8,8 @@
   VERIFY-PARSE, VERIFY-SECRETS.
   -Live (elevated PowerShell, on a test machine without an installed Edge): installs the package as the real
   service into separate EdgeVerify folders with a throw-away Edge id and unreachable broker/PLC, checks
-  LIVE-SERVICE, LIVE-ACL, LIVE-REGACL, LIVE-RUNNING, LIVE-UNINSTALL, and always removes everything again.
+  LIVE-SERVICE, LIVE-ACL, LIVE-REGACL, LIVE-RUNNING, LIVE-DESKTOP-ACL, LIVE-DESKTOP-SHORTCUT, LIVE-DESKTOP-INUSE,
+  LIVE-UNINSTALL, and always removes everything again.
   Prints PASS/FAIL per check; exit 0 only when all pass.
 #>
 [CmdletBinding()]
@@ -47,13 +48,14 @@ try {
     $packaged = (Test-Path $zip) -and $LASTEXITCODE -eq 0
     if ($packaged) {
         Expand-Archive -LiteralPath $zip -DestinationPath $expanded
-        foreach ($name in 'IndustrialIot.Edge.exe', 'appsettings.json', 'install-edge.ps1', 'uninstall-edge.ps1', 'hostfxr.dll') {
+        foreach ($name in 'IndustrialIot.Edge.exe', 'appsettings.json', 'install-edge.ps1', 'uninstall-edge.ps1', 'hostfxr.dll',
+                'EdgeDesktop\IndustrialIot.EdgeDesktop.exe', 'EdgeDesktop\hostfxr.dll') {
             if (-not (Test-Path (Join-Path $expanded $name))) { $packaged = $false; Write-Host "  missing in package: $name" }
         }
         # Files the dev machine wrote under src\Edge\data (settings, password hash, buffer) must not ship.
         if (Test-Path (Join-Path $expanded 'data')) { $packaged = $false; Write-Host '  the package contains a data folder' }
     }
-    Report 'VERIFY-PACKAGE' $packaged 'self-contained package with exe, runtime, appsettings.json and the scripts, no data folder'
+    Report 'VERIFY-PACKAGE' $packaged 'self-contained package with exe, runtime, appsettings.json, the scripts and the desktop monitor, no data folder'
 
     # --- VERIFY-FAILFAST: the packaged exe in console mode stops on invalid configuration, naming the key. ---
     $failFast = $false
@@ -120,11 +122,16 @@ try {
         $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
         $installDir = Join-Path $env:ProgramFiles 'IndustrialIot\EdgeVerify'
         $dataDir = Join-Path $env:ProgramData 'IndustrialIot\EdgeVerify'
+        # Named by install-edge.ps1 after the Edge folder, so a test install never meets the real app or shortcut.
+        $appDir = "$installDir.Desktop"
+        $shortcut = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\IIoT EdgeVerify Monitor.lnk'
+        $appExe = Join-Path $appDir 'IndustrialIot.EdgeDesktop.exe'
         if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
             Report 'LIVE-SERVICE' $false 'needs an elevated PowerShell'
         }
-        elseif ((Get-Service -Name $ServiceName -ErrorAction SilentlyContinue) -or (Test-Path $installDir) -or (Test-Path $dataDir)) {
-            Report 'LIVE-SERVICE' $false "refusing: $ServiceName or the EdgeVerify folders already exist (never touches a real installation)"
+        elseif ((Get-Service -Name $ServiceName -ErrorAction SilentlyContinue) -or (Test-Path $installDir) -or (Test-Path $dataDir) -or
+            (Test-Path $appDir) -or (Test-Path $shortcut)) {
+            Report 'LIVE-SERVICE' $false "refusing: $ServiceName, the EdgeVerify folders or their desktop app or shortcut already exist (never touches a real installation)"
         }
         elseif (-not $packaged) {
             Report 'LIVE-SERVICE' $false 'no package to install'
@@ -219,17 +226,53 @@ try {
                 Report 'LIVE-RUNNING' ($running -and (Get-Service $ServiceName).Status -eq 'Running' -and $owner.Domain -eq 'NT SERVICE' -and $owner.User -eq $ServiceName) `
                     'running as NT SERVICE\IndustrialIot.Edge for 10 s with broker and PLC unreachable'
 
+                # LIVE-DESKTOP-ACL: every user may run the app, nobody but SYSTEM and Administrators may change it.
+                $appRights = @{ 'S-1-5-18' = $fs::FullControl; 'S-1-5-32-544' = $fs::FullControl; 'S-1-5-32-545' = $fs::ReadAndExecute }
+                $appAcl = $installed -and (Test-Path $appExe) -and (Test-Acl (Get-Acl $appDir) $appRights 'FileSystemRights' $true) -and
+                    (Test-Acl (Get-Acl $appExe) $appRights 'FileSystemRights' $false)
+                if ($appAcl) {
+                    $exeAcl = Get-Acl $appExe
+                    $appAcl = -not $exeAcl.AreAccessRulesProtected -and @($exeAcl.Access | Where-Object { -not $_.IsInherited }).Count -eq 0
+                }
+                Report 'LIVE-DESKTOP-ACL' $appAcl "$appDir and its exe: SYSTEM and Administrators full, Users read/execute; owner Administrators"
+
+                # LIVE-DESKTOP-SHORTCUT
+                $target = if (Test-Path $shortcut) { (New-Object -ComObject WScript.Shell).CreateShortcut($shortcut).TargetPath } else { $null }
+                Report 'LIVE-DESKTOP-SHORTCUT' ($target -eq $appExe) "all-users Start Menu shortcut points to $appExe"
+
+                # LIVE-DESKTOP-INUSE: uninstall refuses while the app runs, before it touches the service.
+                $inUse = $false
+                if (Test-Path $appExe) {
+                    $app = Start-Process -FilePath $appExe -ArgumentList '--port', '1' -PassThru
+                    try {
+                        Start-Sleep -Seconds 3
+                        # The refusal must name the monitor (any other refusal also exits 1) and leave the service running.
+                        $refusal = & (Join-Path $PSScriptRoot 'uninstall-edge.ps1') *>&1 | Out-String
+                        Write-Host $refusal.Trim()
+                        $inUse = $LASTEXITCODE -eq 1 -and $refusal -match 'IIoT Edge Monitor' -and
+                            (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue).Status -eq 'Running' -and (Test-Path $appExe) -and (Test-Path $installDir)
+                    }
+                    finally {
+                        if (-not $app.HasExited) { $app.Kill(); $app.WaitForExit(10000) | Out-Null }
+                    }
+                }
+                Report 'LIVE-DESKTOP-INUSE' $inUse 'uninstall refuses (exit 1, naming the monitor) while the app runs, and leaves the service running, program and app in place'
+
                 # LIVE-UNINSTALL
                 & (Join-Path $PSScriptRoot 'uninstall-edge.ps1')
                 Report 'LIVE-UNINSTALL' ((-not (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue)) -and -not (Test-Path $installDir) -and
-                    (Test-Path (Join-Path $dataDir 'appsettings.backup.json'))) 'service and program removed; tag list kept in the data folder'
+                    -not (Test-Path $appDir) -and -not (Test-Path $shortcut) -and
+                    (Test-Path (Join-Path $dataDir 'appsettings.backup.json'))) 'service, program, desktop app and shortcut removed; tag list kept in the data folder'
             }
             finally {
+                Get-CimInstance Win32_Process -Filter "Name='IndustrialIot.EdgeDesktop.exe'" | Where-Object { $_.ExecutablePath -like "$appDir\*" } |
+                    ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
                 if (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue) {
                     & (Join-Path $PSScriptRoot 'uninstall-edge.ps1') -RemoveData | Out-Null
                 }
+                if (Test-Path $shortcut) { [IO.File]::Delete($shortcut) }
                 # rmdir /s removes a junction itself and never follows it.
-                foreach ($leftover in $dataDir, $installDir) { if (Test-Path $leftover) { & cmd.exe /c rmdir /s /q "$leftover" } }
+                foreach ($leftover in $dataDir, $installDir, $appDir) { if (Test-Path $leftover) { & cmd.exe /c rmdir /s /q "$leftover" } }
                 foreach ($parent in (Split-Path $installDir -Parent), (Split-Path $dataDir -Parent)) {
                     if ((Test-Path $parent) -and -not (Get-ChildItem -LiteralPath $parent -Force)) { Remove-Item -LiteralPath $parent -Force }
                 }

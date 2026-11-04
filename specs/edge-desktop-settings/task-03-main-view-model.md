@@ -29,6 +29,9 @@ log, the status bar, the title, and the commands with their enabled rules. Openi
   - Commands and their enabled rules (D-03 toolbar, without the busy rule, which is task-04). Delete asks the D-05
     confirmation. Add/Edit open the task-02 dialog view models through `UserPrompts` and apply OK to the draft.
   - Start: GET → draft.
+  - Carried from the task-02 review: a dialog command that meets a node no longer in the draft
+    (`InvalidOperationException`) is caught where the main view model calls it and logged, never thrown to the
+    window; the PLC dialog's Test kết nối result (`TestMessage`) is also written to the log.
 - Out: the save flow, the busy state, the close guard and D-08 (task-04); XAML.
 
 ## Coverage

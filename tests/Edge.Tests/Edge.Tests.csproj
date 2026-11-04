@@ -23,6 +23,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\Edge\IndustrialIot.Edge.csproj" />
+    <ProjectReference Include="..\..\src\EdgeDesktop.Core\IndustrialIot.EdgeDesktop.Core.csproj" />
   </ItemGroup>
 
 </Project>

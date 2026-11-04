@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The desktop monitor window. Its logic lives in EdgeDesktop.Core; this project is XAML and wiring only. -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <!-- CI builds the whole solution on Linux; this lets that build compile a Windows-only project. -->
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\EdgeDesktop.Core\IndustrialIot.EdgeDesktop.Core.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -4,8 +4,9 @@
   Packages the Edge for a Windows machine without .NET SDK, source code or Internet (run on the dev machine).
 
 .DESCRIPTION
-  Publishes src/Edge self-contained for win-x64 and zips it together with appsettings.json and the
-  install/uninstall scripts. Copy the zip to the Edge machine and run install-edge.ps1 from it.
+  Publishes src/Edge self-contained for win-x64 and zips it together with appsettings.json, the
+  install/uninstall scripts and the desktop monitor (src/EdgeDesktop, in EdgeDesktop\). Copy the zip to the
+  Edge machine and run install-edge.ps1 from it.
 
 .EXAMPLE
   powershell -ExecutionPolicy Bypass -File deployments\edge\package-edge.ps1
@@ -25,6 +26,12 @@ try {
     & dotnet publish (Join-Path $repo 'src\Edge\IndustrialIot.Edge.csproj') -c Release -r win-x64 --self-contained true `
         -o $staging -nologo -v quiet
     if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed with exit code $LASTEXITCODE." }
+
+    # The desktop monitor, self-contained too; install-edge.ps1 moves EdgeDesktop\ to its own folder every user may run.
+    Write-Host "Publishing the desktop monitor (self-contained, win-x64)..."
+    & dotnet publish (Join-Path $repo 'src\EdgeDesktop\IndustrialIot.EdgeDesktop.csproj') -c Release -r win-x64 --self-contained true `
+        -o (Join-Path $staging 'EdgeDesktop') -nologo -v quiet
+    if ($LASTEXITCODE -ne 0) { throw "dotnet publish of the desktop monitor failed with exit code $LASTEXITCODE." }
 
     # The scripts travel with the program, so the Edge machine needs nothing but this zip.
     Copy-Item (Join-Path $PSScriptRoot 'install-edge.ps1'), (Join-Path $PSScriptRoot 'uninstall-edge.ps1') $staging

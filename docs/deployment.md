@@ -310,7 +310,9 @@ Script sẽ:
 - tạo service `IndustrialIot.Edge` chạy bằng tài khoản ảo `NT SERVICE\IndustrialIot.Edge`, tự khởi động cùng
   Windows và tự khởi động lại khi lỗi (3 lần, cách nhau 5 giây);
 - lưu cấu hình và mật khẩu MQTT vào biến môi trường của service (registry), khoá lại để chỉ SYSTEM,
-  Administrators và chính service đọc được.
+  Administrators và chính service đọc được;
+- cài [ứng dụng IIoT Edge Monitor](#ứng-dụng-iiot-edge-monitor-windows) vào `C:\Program Files\IndustrialIot\Edge.Desktop`
+  và tạo shortcut "IIoT Edge Monitor" trong Start Menu cho mọi người dùng của máy.
 
 Gặp lỗi giữa chừng, script tự gỡ những gì đã tạo. `-EdgeId` phải trùng EdgeId đã tạo bằng `dev-secrets.sh`;
 `-BrokerHost` phải là IP/tên đã đưa vào `--san`.
@@ -344,6 +346,43 @@ chỉ nghe trên `localhost` — máy khác trong mạng không truy cập đư�
 
 Cổng 5080 đã bị chương trình khác chiếm thì Edge vẫn chạy bình thường, chỉ ghi lỗi
 `Monitor page disabled: port ... is not available` vào log — đổi `Port` rồi `Restart-Service IndustrialIot.Edge`.
+
+#### Ứng dụng IIoT Edge Monitor (Windows)
+
+Cùng nội dung với trang PLC Monitor ở **http://localhost:5080/**, nhưng là một chương trình Windows riêng, không cần
+mở trình duyệt. Bộ cài đặt nó vào `C:\Program Files\IndustrialIot\Edge.Desktop` (mọi người dùng chạy được, chỉ
+Administrators/SYSTEM sửa được) và tạo shortcut **Start Menu → IIoT Edge Monitor** cho mọi người dùng. Người dùng
+thường (không phải admin) mở được.
+
+- Hiện Edge ID, 4 thẻ (PLC, chu kỳ đọc gần nhất, MQTT, buffer chờ gửi), bảng PLC và bảng tag; tự cập nhật khoảng mỗi
+  giây. Dữ liệu lấy từ chính phần mềm Edge trên máy này (`http://127.0.0.1:<cổng>/api/status`), nên Edge phải đang chạy
+  và trang Monitor phải bật (`"Monitor": { "Enabled": true }`).
+- **Chỉ xem**: không ghi xuống PLC, không đổi cấu hình. Nút **Mở trang cấu hình** mở
+  `http://localhost:<cổng>/settings` trong trình duyệt mặc định; cấu hình PLC và tag vẫn làm trên
+  [trang web](#trang-cấu-hình-plc-và-tag).
+- **Cổng khác 5080** (đã đổi `Monitor:Port`): chạy với `--port`, ví dụ
+  `"C:\Program Files\IndustrialIot\Edge.Desktop\IndustrialIot.EdgeDesktop.exe" --port 5081`. Shortcut của bộ cài
+  luôn dùng 5080; cần cổng khác thì tạo shortcut riêng có thêm `--port`.
+- **SmartScreen:** file exe chưa được ký số, nên lần mở đầu Windows SmartScreen có thể cảnh báo "Windows protected your
+  PC". Chọn **More info → Run anyway** nếu file lấy từ gói cài của dự án; chính sách công ty chặn exe không ký thì chưa
+  dùng được ứng dụng (dùng trang web).
+- **Gỡ cài đặt** từ chối chạy khi ứng dụng đang mở (báo "Hãy đóng IIoT Edge Monitor rồi chạy lại.", không xoá gì): đóng
+  ứng dụng ở mọi phiên đăng nhập rồi gỡ lại. Gỡ xong thì `Edge.Desktop` và shortcut cũng bị xoá.
+
+Chạy từ mã nguồn (máy dev, Edge đang chạy từ Visual Studio hoặc `dotnet run`):
+`dotnet run --project src\EdgeDesktop` (thêm `-- --port 5081` nếu cần).
+
+| Ứng dụng báo | Nguyên nhân | Cách xử lý |
+|---|---|---|
+| Dải đỏ "Không lấy được dữ liệu từ phần mềm Edge (không kết nối được)…" | Edge không chạy, trang Monitor tắt, hoặc sai cổng | `Get-Service IndustrialIot.Edge`; kiểm tra `Monitor:Enabled`/`Port`; chạy với đúng `--port` |
+| "… (quá 2 giây không trả lời)…" | Edge quá bận hoặc treo | Xem Event Log của Edge; ứng dụng tự thử lại |
+| "… (HTTP 404)…" hoặc mã 4xx khác | Cổng đó là chương trình khác, không phải Edge | Chạy với đúng `--port` |
+| "… (HTTP 500)…" hoặc mã 5xx khác | Lỗi bên trong Edge | Xem Event Log của Edge |
+| "… (dữ liệu không đọc được)…" | Cổng đó trả về thứ không phải dữ liệu của Edge (chương trình khác) | Chạy với đúng `--port` |
+| Không có dải đỏ nhưng thẻ hoặc bảng trống bất thường | Edge và ứng dụng khác phiên bản: trường ứng dụng cần bị thiếu hoặc đổi tên nên để trống, không báo lỗi (hoặc cổng đó là chương trình khác trả JSON) | Cài lại cả hai từ cùng một gói |
+| Hộp thoại "Tham số không hợp lệ…" hoặc "--port cần một số từ 1 đến 65535…", ứng dụng thoát (exit code 2) | Tham số dòng lệnh sai | Chỉ dùng `--port N` |
+
+Khi có dải đỏ, ứng dụng vẫn giữ số liệu lần đọc được gần nhất và tự thử lại mỗi giây; dải đỏ tự tắt khi Edge trả lời lại.
 
 #### Trang cấu hình PLC và tag
 
@@ -467,6 +506,10 @@ Khi gỡ không có `-RemoveData`, `edge.settings.json` và mật khẩu trang c
 file này còn, PLC và tag lấy từ nó (bỏ qua `appsettings.json` và `Edge__Plc__Host`), xem
 [Trang cấu hình PLC và tag](#trang-cấu-hình-plc-và-tag).
 
+Script gỡ xoá luôn `C:\Program Files\IndustrialIot\Edge.Desktop` và shortcut "IIoT Edge Monitor", **trước** khi xoá
+service. Nếu [IIoT Edge Monitor](#ứng-dụng-iiot-edge-monitor-windows) còn mở (ở bất kỳ phiên đăng nhập nào), script báo
+"Hãy đóng IIoT Edge Monitor rồi chạy lại." và không xoá gì.
+
 Nếu script cài báo một thư mục `IndustrialIot` "not owned by Administrators or SYSTEM", có người đã tạo sẵn thư
 mục đó: kiểm tra nội dung, xoá nó (hoặc `takeown /f <thư mục> /a /r`) rồi cài lại. Script cố ý từ chối, vì chủ
 sở hữu thư mục luôn tự cấp lại được quyền cho mình và có thể thay chứng chỉ CA. Báo "is a link or junction" nghĩa
@@ -525,4 +568,5 @@ powershell -ExecutionPolicy Bypass -File deployments\edge\verify-edge.ps1 -Live 
 ```
 
 `-Live` cài thật vào thư mục riêng `EdgeVerify` với EdgeId giả và broker/PLC không tồn tại, kiểm tra service,
-quyền thư mục, quyền registry, rồi gỡ sạch. Nó từ chối chạy nếu máy đã có Edge thật.
+quyền thư mục, quyền registry, thư mục `EdgeVerify.Desktop` và shortcut "IIoT EdgeVerify Monitor" của ứng dụng
+Monitor, việc gỡ bị từ chối khi ứng dụng đang mở, rồi gỡ sạch. Nó từ chối chạy nếu máy đã có Edge thật.

@@ -1,0 +1,5 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The desktop monitor's logic without WPF, so it builds and is tested on Linux CI (the window is src/EdgeDesktop). -->
+
+</Project>

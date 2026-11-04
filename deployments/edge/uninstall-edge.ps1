@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
   Removes the Windows Service "IndustrialIot.Edge" and its program files; keeps the data unless -RemoveData.
@@ -8,6 +8,8 @@
   executable path and its Edge__Buffer__Path setting), never from arguments, and each must be one of the
   IndustrialIot\Edge* folders the installer creates. The tag list (appsettings.json) is copied to
   <data folder>\appsettings.backup.json first; the buffer database stays unless -RemoveData is given.
+  The desktop monitor ("<program folder>.Desktop") and its Start Menu shortcut go too. While the monitor runs,
+  nothing is removed (exit 1).
 #>
 [CmdletBinding()]
 param([switch] $RemoveData)
@@ -66,6 +68,18 @@ if (-not (Test-EdgeFolder $installDir $env:ProgramFiles) -or -not (Test-Path -Li
 if ($dataDir -and -not (Test-EdgeFolder $dataDir $env:ProgramData)) {
     Stop-WithError "unexpected data folder '$dataDir'; remove the service and its folders by hand."
 }
+
+# The desktop monitor, named after the program folder as install-edge.ps1 does. A running copy holds its files
+# open, so refuse before the service is touched; a copy whose path cannot be read counts as running.
+$appDir = "$installDir.Desktop"
+$shortcut = Join-Path $env:ProgramData "Microsoft\Windows\Start Menu\Programs\IIoT $(Split-Path $installDir -Leaf) Monitor.lnk"
+$monitors = @(Get-CimInstance Win32_Process -Filter "Name='IndustrialIot.EdgeDesktop.exe'" |
+        Where-Object { -not $_.ExecutablePath -or $_.ExecutablePath -like "$appDir\*" })
+if ($monitors.Count -gt 0) { Stop-WithError 'Hãy đóng IIoT Edge Monitor rồi chạy lại.' }
+# Removed before the service, shortcut first: if someone starts the app in between and a file stays locked, the
+# script stops with the service still installed, so running it again finishes the job.
+if (Test-Path -LiteralPath $shortcut) { [IO.File]::Delete($shortcut); Write-Host "Removed $shortcut" }
+if (Test-Path -LiteralPath $appDir) { Remove-FolderNoFollow $appDir; Write-Host "Removed $appDir" }
 
 Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
 & sc.exe delete $ServiceName | Out-Null

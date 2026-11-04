@@ -10,6 +10,8 @@
     Administrators and the service, all owned by Administrators.
   - The service runs as its own virtual account "NT SERVICE\IndustrialIot.Edge", starts automatically and
     restarts on failure.
+  - The desktop monitor goes to "<InstallDir>.Desktop" (every user may run it, only Administrators/SYSTEM change it)
+    with an all-users Start Menu shortcut "IIoT <leaf of InstallDir> Monitor".
   - Settings and the MQTT password are stored as the service's environment (registry value "Environment"),
     on a registry key only SYSTEM, Administrators and the service can read.
   The MQTT password is asked for interactively, never printed and never passed to a cmdlet (so PowerShell
@@ -187,8 +189,16 @@ if (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue) {
     Stop-WithError "the service $ServiceName already exists; run uninstall-edge.ps1 first."
 }
 if (Test-Path -LiteralPath $InstallDir) { Stop-WithError "$InstallDir already exists; run uninstall-edge.ps1 first." }
+# The desktop monitor beside the program folder ("Edge.Desktop" is never an Edge folder: the dot fails Test-EdgeFolder).
+$AppDir = "$InstallDir.Desktop"
+$startMenu = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs'
+$Shortcut = Join-Path $startMenu "IIoT $(Split-Path $InstallDir -Leaf) Monitor.lnk"
+if (Test-Path -LiteralPath $AppDir) { Stop-WithError "$AppDir already exists; run uninstall-edge.ps1 first." }
+if (Test-Path -LiteralPath $Shortcut) { Stop-WithError "$Shortcut already exists; run uninstall-edge.ps1 first." }
+if (Test-ReparsePoint $startMenu) { Stop-WithError "$startMenu is a link or junction; refusing to install through it." }
 
-$created = @{ ProgramParent = -not (Test-Path $programParent); DataParent = -not (Test-Path $dataParent); Data = -not (Test-Path $DataDir) }
+$created = @{ ProgramParent = -not (Test-Path $programParent); DataParent = -not (Test-Path $dataParent); Data = -not (Test-Path $DataDir)
+    App = $false; Shortcut = $false }
 $serviceCreated = $false
 $bstr = [IntPtr]::Zero
 try {
@@ -206,6 +216,22 @@ try {
     Expand-Archive -LiteralPath $PackagePath -DestinationPath $InstallDir
     $exe = Join-Path $InstallDir 'IndustrialIot.Edge.exe'
     if (-not (Test-Path -LiteralPath $exe)) { throw "the package does not contain IndustrialIot.Edge.exe." }
+
+    # The desktop monitor leaves the program folder (closed to Users) for its own. Directory.Move fails when the
+    # target exists, so it never lands inside a folder someone else made.
+    $appExe = Join-Path $AppDir 'IndustrialIot.EdgeDesktop.exe'
+    $desktopFiles = Join-Path $InstallDir 'EdgeDesktop'
+    if (-not (Test-Path -LiteralPath (Join-Path $desktopFiles 'IndustrialIot.EdgeDesktop.exe'))) {
+        throw "the package does not contain EdgeDesktop\IndustrialIot.EdgeDesktop.exe."
+    }
+    [IO.Directory]::Move($desktopFiles, $AppDir)
+    $created.App = $true
+    Set-PrivateFolder -Path $AppDir -Grants @(@($System, 'FullControl'), @($Administrators, 'FullControl'), @($users, 'ReadAndExecute'))
+    $link = (New-Object -ComObject WScript.Shell).CreateShortcut($Shortcut)
+    $link.TargetPath = $appExe
+    $link.WorkingDirectory = $AppDir
+    $link.Save()
+    $created.Shortcut = $true
 
     # A fresh file (never an overwrite) so it carries only the folder's inherited permissions.
     $caPath = Join-Path $DataDir 'ca.pem'
@@ -253,6 +279,7 @@ try {
 
     Write-Host "Installed and started $ServiceName (account $ServiceAccount)."
     Write-Host "PLC and tags: run & '$InstallDir\IndustrialIot.Edge.exe' set-settings-password --service (as Administrator), then open http://localhost:5080/settings on this machine (start read-only)."
+    Write-Host "Monitor for every user of this machine: Start menu > $([IO.Path]::GetFileNameWithoutExtension($Shortcut))."
 }
 catch {
     Write-Host "install-edge: $($_.Exception.Message)" -ForegroundColor Red
@@ -262,6 +289,11 @@ catch {
         & sc.exe delete $ServiceName | Out-Null
     }
     if (Test-Path -LiteralPath $InstallDir) { try { Remove-FolderNoFollow $InstallDir } catch { } }
+    if ($created.Shortcut -and (Test-Path -LiteralPath $Shortcut)) { try { [IO.File]::Delete($Shortcut) } catch { } }
+    if ($created.App -and (Test-Path -LiteralPath $AppDir)) {
+        # A user may already have started the app from the new shortcut; a locked file leaves the folder behind.
+        try { Remove-FolderNoFollow $AppDir } catch { Write-Host "install-edge: could not remove $AppDir; close the monitor and delete it by hand." -ForegroundColor Red }
+    }
     if ($created.Data -and (Test-Path -LiteralPath $DataDir)) { try { Remove-FolderNoFollow $DataDir } catch { } }
     foreach ($parent in @(@($created.ProgramParent, $programParent), @($created.DataParent, $dataParent))) {
         if ($parent[0] -and (Test-Path -LiteralPath $parent[1]) -and -not (Get-ChildItem -LiteralPath $parent[1] -Force)) {

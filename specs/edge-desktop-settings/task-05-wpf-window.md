@@ -11,7 +11,8 @@ the listed XAML files exist and that every binding path in them exists on its vi
   - `MainWindow.xaml(.cs)` rewritten:
     - menu, toolbar, tree, tag grid, log (Xem → Log sự kiện hides it), status bar;
     - key bindings Ctrl+S, F5, Enter, Del;
-    - commands disabled as the view model says, including while busy; tree and grid double-click and Enter call the
+    - commands disabled as the view model says, including while busy; the PLC dialog's Test kết nối button is
+      disabled while its test runs (carried from the task-02 review); tree and grid double-click and Enter call the
       same view-model commands (no handler acts on its own), so busy blocks them too;
     - the 4 cards and the web-copy tables removed;
     - window closing routed to the close guard.

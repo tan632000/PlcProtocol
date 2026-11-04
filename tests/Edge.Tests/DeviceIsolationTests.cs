@@ -10,6 +10,7 @@ namespace IndustrialIot.Edge.Tests;
 /// One PLC that is down, silent or lost mid-run does not slow or stop another: the real drivers talk TCP to fake PLCs,
 /// the real poller runs on the real clock, and the healthy device must keep its own interval.
 /// </summary>
+[Collection(DeviceIsolationCollection.Name)]
 public sealed class DeviceIsolationTests
 {
     // The dead PLC's timeout is ten of the healthy PLC's intervals, so any coupling shows up as a gap of seconds.
@@ -153,4 +154,14 @@ public sealed class DeviceIsolationTests
             await Task.Delay(10);
         }
     }
+}
+
+/// <summary>
+/// These tests time the real poller on the real clock, so they run alone: other test classes busy on a small CI
+/// machine stretched a healthy 200 ms interval past the 1 s gap the tests allow.
+/// </summary>
+[CollectionDefinition(Name, DisableParallelization = true)]
+public sealed class DeviceIsolationCollection
+{
+    public const string Name = "device-isolation";
 }

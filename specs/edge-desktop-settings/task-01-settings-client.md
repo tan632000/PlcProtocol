@@ -1,6 +1,6 @@
 # Task 01 — The desktop Core reads, checks, saves and tests settings through the real API
 
-Status: pending
+Status: done
 
 ## Outcome
 `IndustrialIot.EdgeDesktop.Core` can load the Edge's settings into an editable draft, send the draft to `validate`,
@@ -115,3 +115,18 @@ proven against the real settings API.
 On a failed Step or Verification Plan run: stop; do not widen scope, change the Command, or weaken a test; record observed versus expected; repair only the cited cause; after three failed rounds, stop and ask the user.
 
 ## Receipt
+
+Verification: PASS
+Command: dotnet test tests/Edge.Tests/Edge.Tests.csproj --filter "FullyQualifiedName~IndustrialIot.Edge.Tests.Desktop" -- RunConfiguration.TreatNoTestsAsError=true
+Exit: 0
+Base: 11356fec8be3015f2800d12dbbd33e94f94e6688
+Head: 547f4a3c6c4a4d4ef7a24cf01f880a1085f7cd928ef39204abc0c668e6e65f94
+Process: with the tests written and before the Core files existed, the Command exited 1 on 15 compile errors naming the missing types (ConfigDraft, SettingsSnapshot, RefusalKind, PlcConnection).
+Counterexamples: ten mutants on a disposable copy of src/Shared, src/Edge, src/EdgeDesktop.Core and tests/Edge.Tests (deleted afterwards), all KILLED: a foreign Origin header (12 tests failed, including the real save), top-level key `Revision` (7), stale-revision read as Failed (2), rate-limited read as Locked (2, including eleven real tests in a minute), the password kept in a failed save result (5), an empty password sent (1), a test using the 30 s timeout (1), a non-object reply throwing (2), GET using a 5 s timeout (1), the password in a successful save result (2).
+Reachability: SettingsClientTests runs the real SettingsService and PlcConnectionTester under AddEdgeSupervisor with fake PLC drivers: strict GET read, round trip through the draft, validate error paths located in the draft, save accepted and applied (seen on /api/status), wrong password, no password file, lockout with its seconds, stale revision, an invalid save, a closed port, endpoint-in-use, test-running, rate-limited after ten tests.
+Review: fresh-context code review PASS_WITH_WARNINGS (Medium: a valid-JSON non-object reply made Errors() throw; GET/validate timeouts untested; the password check covered only the failure branch), repaired with object checks, an unreadable-snapshot rule and tests for each; Lows repaired: negative TimeoutMs floored, caller cancellation documented, a node already in the draft refused, an invalid save on the real API. Re-review PASS.
+Limitation: validate treats a 200 reply that is not a JSON object as valid (only possible when another program holds the port, the accepted risk G11; the following PUT still fails). ApplyInProgress and TooLarge are proven with a scripted handler only. Dispose during a request is reported as a timeout.
+```text
+$ dotnet test tests/Edge.Tests/Edge.Tests.csproj --filter "FullyQualifiedName~IndustrialIot.Edge.Tests.Desktop" -- RunConfiguration.TreatNoTestsAsError=true
+Passed!  - Failed:     0, Passed:   114, Skipped:     0, Total:   114, Duration: 19 s - Edge.Tests.dll (net10.0)
+```

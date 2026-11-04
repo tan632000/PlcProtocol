@@ -1,6 +1,6 @@
 # Task 02 — Dialog view models offer only what the PLC model allows
 
-Status: pending
+Status: done
 
 ## Outcome
 The Channel (with its driver picker), PLC and Tag dialogs exist as Core view models. They edit a copy of one draft
@@ -48,6 +48,8 @@ node under the model catalog, check it with `validate`, and the PLC dialog tests
   - `src/EdgeDesktop.Core/DeviceDialogViewModel.cs`
   - `src/EdgeDesktop.Core/TagDialogViewModel.cs`
   - `src/EdgeDesktop.Core/UserPrompts.cs`
+  - `src/EdgeDesktop.Core/DialogViewModel.cs` (the dialogs' shared base, added during implementation; within the plan
+    row's `*DialogViewModel.cs`)
   - `tests/Edge.Tests/Desktop/DialogViewModelTests.cs`
 - Read:
   - `src/EdgeDesktop.Core/ConfigDraft.cs`
@@ -96,3 +98,19 @@ node under the model catalog, check it with `validate`, and the PLC dialog tests
 On a failed Step or Verification Plan run: stop; do not widen scope, change the Command, or weaken a test; record observed versus expected; repair only the cited cause; after three failed rounds, stop and ask the user.
 
 ## Receipt
+
+Verification: PASS
+Command: dotnet test tests/Edge.Tests/Edge.Tests.csproj --filter "FullyQualifiedName~IndustrialIot.Edge.Tests.Desktop" -- RunConfiguration.TreatNoTestsAsError=true
+Exit: 0
+Base: 11356fec8be3015f2800d12dbbd33e94f94e6688
+Head: 47f89c81ce67849cbdf0869f118c9e4ea8194fd2a07c861233a73b3a49bfe03f
+Process: with DialogViewModelTests written and before the dialog view models existed, the Command exited 1 at compile time on the missing IUserPrompts and dialog types.
+Counterexamples: seven mutants on a disposable copy (deleted afterwards), each KILLED on a green baseline: FX3U allows "Cho phép ghi", a Slmp3E channel offers every model, Huỷ keeps an edit (Host written straight to the node), Kiểm tra shows another tag's error, rate-limited shows the lockout text, a model change keeps the old port/rack/slot, a cancelled password still tests. A first mutant run had the other-tag mutant SURVIVE (both errors were on Address, so the overwrite looked right); the test now puts the other tag's error on Name.
+Reachability: source; the Kiểm tra and Test kết nối requests go through the task-01 SettingsClient (scripted handler), whose contract with the real API is task-01's receipt.
+Review: fresh-context code review PASS_WITH_WARNINGS (Medium: no test changed the model, since the Edge's catalog has one model per driver), repaired with two extra S7 models in the test fixture and a model-change test; Lows repaired: DialogViewModel.cs added to Ownership, WritesAllowed raised on model change, a tag-level error shown as the message, more cases (password-not-set, switching writes off, edit by reference after a removal, tag-level error). Re-review PASS.
+Scope note: src/EdgeDesktop.Core/DialogViewModel.cs (shared base of the three dialogs) was added during implementation and recorded in Ownership; it is within the plan row's `*DialogViewModel.cs`.
+Limitation: opening an edit of a node whose model does not allow writes drops its write flags on OK (stricter than the web page, which keeps a ticked box until unticked); an overflowing number says "phải là số"; a new tag defaults to Int, the web page to the model's first type. Carried to later tasks: catch a detached-node exception where the main window calls a dialog command (task-03), disable Test kết nối while busy (task-05), and a way for the main window to log test results (task-03).
+```text
+$ dotnet test tests/Edge.Tests/Edge.Tests.csproj --filter "FullyQualifiedName~IndustrialIot.Edge.Tests.Desktop" -- RunConfiguration.TreatNoTestsAsError=true
+Passed!  - Failed:     0, Passed:   149, Skipped:     0, Total:   149, Duration: 19 s - Edge.Tests.dll (net10.0)
+```

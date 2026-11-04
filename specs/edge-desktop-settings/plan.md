@@ -195,8 +195,8 @@ to the node and field; errors of test-connection map by `proposed:{key}` to the 
 ## Tasks
 | # | Task | Priority | Criteria | Primary ownership | Dependencies | Status |
 |---|---|---|---|---|---|---|
-| 01 | Settings client and draft, contract-tested on the real API | P1 | AC-04, AC-05, AC-07, AC-09 | `src/EdgeDesktop.Core/` (new files), `tests/Edge.Tests/Desktop/` (new files) | - | pending |
-| 02 | Dialog view models under the catalog rules | P1 | AC-03, AC-04, AC-07, AC-09 | `src/EdgeDesktop.Core/*DialogViewModel.cs`, `UserPrompts.cs`, tests | task-01-settings-client.md | pending |
+| 01 | Settings client and draft, contract-tested on the real API | P1 | AC-04, AC-05, AC-07, AC-09 | `src/EdgeDesktop.Core/` (new files), `tests/Edge.Tests/Desktop/` (new files) | - | done |
+| 02 | Dialog view models under the catalog rules | P1 | AC-03, AC-04, AC-07, AC-09 | `src/EdgeDesktop.Core/*DialogViewModel.cs`, `UserPrompts.cs`, tests | task-01-settings-client.md | done |
 | 03 | Main view model: tree, grid, log, status bar, commands | P1 | AC-01, AC-02, AC-03 | `src/EdgeDesktop.Core/MainViewModel.cs`, `MonitorViewModel.cs` (D-07 addition), `UserPrompts.cs`, tests | task-02-dialog-view-models.md | pending |
 | 04 | Save flow: busy, apply wait, refusals, close guard, outside changes | P1 | AC-05, AC-06, AC-07, AC-08 | `src/EdgeDesktop.Core/SaveFlow.cs`, `MainViewModel.cs`, `UserPrompts.cs`, tests | task-03-main-view-model.md | pending |
 | 05 | WPF window and dialogs, XAML binding test | P1 | AC-01–AC-06, AC-09 | `src/EdgeDesktop/`, `tests/Edge.Tests/Desktop/XamlBindingTests.cs` | task-04-save-flow.md | pending |

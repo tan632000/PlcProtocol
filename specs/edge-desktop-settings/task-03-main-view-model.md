@@ -1,6 +1,6 @@
 # Task 03 — The main view model shows the tree with live state and values
 
-Status: pending
+Status: done
 
 ## Outcome
 One Core view model drives the window's display: the tree with state texts, the tag grid with live values, the event
@@ -44,6 +44,8 @@ log, the status bar, the title, and the commands with their enabled rules. Openi
 - Modify:
   - `src/EdgeDesktop.Core/MonitorViewModel.cs` (D-07 addition only)
   - `src/EdgeDesktop.Core/UserPrompts.cs` (dialog openers)
+  - `src/EdgeDesktop.Core/DeviceDialogViewModel.cs` (one line, added during implementation: `TestMessage` is cleared
+    before each test request, so an equal result still raises a change and is logged again)
 - Read:
   - `src/EdgeDesktop.Core/SettingsClient.cs`
   - `src/EdgeDesktop.Core/ConfigDraft.cs`
@@ -87,3 +89,21 @@ log, the status bar, the title, and the commands with their enabled rules. Openi
 On a failed Step or Verification Plan run: stop; do not widen scope, change the Command, or weaken a test; record observed versus expected; repair only the cited cause; after three failed rounds, stop and ask the user.
 
 ## Receipt
+
+Verification: PASS
+Command: dotnet test tests/Edge.Tests/Edge.Tests.csproj --filter "FullyQualifiedName~IndustrialIot.Edge.Tests.Desktop" -- RunConfiguration.TreatNoTestsAsError=true
+Exit: 0
+Base: e79ef59a4088b4568e0be4eadd179759ebbfa16f
+Head: 45d31d84fa1109e78f71c373353fad50342066a725887a1c49f44894de5ebf10
+Process: with MainViewModelTests written and before MainViewModel existed, the Command exited 1 at compile time on the missing MainViewModel, TreeNode, DialogRequest and IDialogOpener types.
+Counterexamples: thirteen mutants on a disposable copy (deleted afterwards), each KILLED on a green baseline: the three of the Verification Plan (Edge lost logged on every failed poll, a tag of another PLC turning the state to "Có tag lỗi", a draft-only tag showing another tag's value) and a PLC state logged on every status, a detached node on OK thrown to the window, an uncapped log, LegacyTagIds ignored, an equal test result not logged again, activate keeping the selected tag, a rebuilt tree losing the selection mark, a rebuilt tree expanding every channel, a legacy TagId matched on any PLC, the selected tag dropped on a value refresh.
+Oracle: `git diff --stat tests/Edge.Tests/Desktop/MonitorViewModelTests.cs` printed nothing (unchanged).
+Reachability: source; statuses reach MainViewModel only through MonitorViewModel.Apply and StatusApplied (the poll loop's own tests stay in MonitorViewModelTests); settings requests go through the task-01 SettingsClient (scripted handler), whose contract with the real API is task-01's receipt. The window binding is task-05.
+Review: fresh-context code review FAIL (High: double-click on a PLC while one of its tags was selected opened Edit Tag; Medium: the rebuilt tree had no IsSelected/IsExpanded, so WPF would lose the highlight and expansion), repaired with tests, plus Lows (live value matched by TagId and PLC, a test for the grid selection kept across refreshes, DialogRequest doc). Fresh re-review PASS.
+Scope note: src/EdgeDesktop.Core/DeviceDialogViewModel.cs got one line (TestMessage cleared before each test request, so an equal result is logged again), recorded in Ownership.
+Limitation: the log records the Edge's PLC state changes (Đang đọc, Mất kết nối, Chưa có dữ liệu, Đã tắt); the tree's "Có tag lỗi" coming and going is not logged, to avoid one entry per tag quality flap. "Chưa lưu" is decided by the PLC's name being absent from /api/status, so a renamed PLC shows it until saved. Carried to task-05: bind TreeNode IsSelected/IsExpanded two-way, and close a dialog whose OK met a node no longer in the draft, even the tag dialog in Add mode.
+```text
+$ dotnet test tests/Edge.Tests/Edge.Tests.csproj --filter "FullyQualifiedName~IndustrialIot.Edge.Tests.Desktop" -- RunConfiguration.TreatNoTestsAsError=true
+Passed!  - Failed:     0, Passed:   173, Skipped:     0, Total:   173, Duration: 19 s - Edge.Tests.dll (net10.0)
+exit=0
+```

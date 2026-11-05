@@ -14,6 +14,9 @@ the listed XAML files exist and that every binding path in them exists on its vi
     - commands disabled as the view model says, including while busy; the PLC dialog's Test kết nối button is
       disabled while its test runs (carried from the task-02 review); tree and grid double-click and Enter call the
       same view-model commands (no handler acts on its own), so busy blocks them too;
+    - tree items bind `IsSelected` and `IsExpanded` of `TreeNode` two-way, and the tree's selection change sets
+      `MainViewModel.SelectedNode` (carried from the task-03 review); a dialog whose `DialogRequest.Ok` logged a node
+      no longer in the draft closes, even the tag dialog in Add mode;
     - the 4 cards and the web-copy tables removed;
     - window closing routed to the close guard.
   - Dialog windows:

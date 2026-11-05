@@ -80,10 +80,12 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private readonly IDialogOpener _dialogs;
     private readonly TimeProvider _time;
     private readonly int _port;
+    private readonly SaveFlow _save;
 
     // The last state text of each PLC, to log a change once.
     private readonly Dictionary<string, string> _plcStates = new(StringComparer.Ordinal);
     private bool _edgeLost;
+    private int _openDialogs;
 
     public MainViewModel(MonitorViewModel monitor, SettingsClient client, IUserPrompts prompts, IDialogOpener dialogs, TimeProvider time, int port)
     {
@@ -98,6 +100,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         _dialogs = dialogs;
         _time = time;
         _port = port;
+        _save = new SaveFlow(this, client, prompts, monitor, time);
         monitor.PropertyChanged += OnMonitorChanged;
         monitor.StatusApplied += OnStatusApplied;
         DraftChanged();
@@ -149,10 +152,13 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public string Title =>
         (Monitor.EdgeId.Length == 0 ? "IIoT Edge Monitor" : $"IIoT Edge Monitor — {Monitor.EdgeId}") + (Draft?.IsDirty == true ? " *" : "");
 
-    /// <summary>The first status bar field: the Edge, or the failure banner while the status cannot be read.</summary>
-    public string EdgeField => Monitor.Banner ?? $"Edge: {(Monitor.EdgeId.Length == 0 ? "…" : Monitor.EdgeId)}";
+    /// <summary>
+    /// The first status bar field: the Edge, or the failure banner while the status cannot be read, except during this
+    /// app's apply wait, when the monitor server restarts with the Edge.
+    /// </summary>
+    public string EdgeField => EdgeFieldIsError ? Monitor.Banner! : $"Edge: {(Monitor.EdgeId.Length == 0 ? "…" : Monitor.EdgeId)}";
 
-    public bool EdgeFieldIsError => Monitor.Banner is not null;
+    public bool EdgeFieldIsError => Monitor.Banner is not null && !_save.IsWaiting;
 
     public string Endpoint => $"127.0.0.1:{_port.ToString(CultureInfo.InvariantCulture)}";
 
@@ -164,23 +170,43 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     public string CommandsField => Draft is null ? "Lệnh ghi từ Cloud: ?" : $"Lệnh ghi từ Cloud: {(Draft.CommandsEnabled ? "bật" : "tắt")}";
 
-    public string SaveField => Draft?.IsDirty == true ? "Có thay đổi chưa lưu" : "Đã lưu";
+    public string SaveField =>
+        _save.IsWaiting ? "Đang áp dụng (Edge khởi động lại)…" : Draft?.IsDirty == true ? "Có thay đổi chưa lưu" : "Đã lưu";
 
-    public bool CanAddChannel => Draft is not null;
+    /// <summary>From the first save check to the end of the apply wait, and while the settings are read: no command runs.</summary>
+    public bool IsBusy => _save.IsBusy;
 
-    public bool CanAddDevice => Draft is not null && SelectedNode is { Kind: TreeNodeKind.Channel or TreeNodeKind.Device };
+    public bool CanAddChannel => Ready;
 
-    public bool CanAddTag => Draft is not null && SelectedNode is { Kind: TreeNodeKind.Device };
+    public bool CanAddDevice => Ready && SelectedNode is { Kind: TreeNodeKind.Channel or TreeNodeKind.Device };
 
-    public bool CanEdit => Draft is not null && (SelectedTag is not null || SelectedNode is { Kind: not TreeNodeKind.AddChannel });
+    public bool CanAddTag => Ready && SelectedNode is { Kind: TreeNodeKind.Device };
+
+    public bool CanEdit => Ready && (SelectedTag is not null || SelectedNode is { Kind: not TreeNodeKind.AddChannel });
 
     public bool CanDelete => CanEdit;
 
-    public bool CanSave => Draft is { IsDirty: true, IsStale: false };
+    public bool CanSave => !IsBusy && Draft is { IsDirty: true, IsStale: false };
 
-    public bool CanCheck => Draft is not null;
+    public bool CanCheck => Ready;
 
     public bool CanTestConnection => CanAddTag;
+
+    public bool CanReload => !IsBusy;
+
+    /// <summary>A dialog of this window is open (D-08: an outside change is then not reloaded under it).</summary>
+    internal bool DialogOpen => _openDialogs > 0;
+
+    private bool Ready => Draft is not null && !IsBusy;
+
+    /// <summary>Lưu &amp; áp dụng (plan D-04); true once the Edge has applied it.</summary>
+    public Task<bool> SaveAsync() => _save.SaveAsync();
+
+    /// <summary>Tải lại từ Edge, after a confirmation when there are unsaved changes.</summary>
+    public Task ReloadAsync() => _save.ReloadAsync();
+
+    /// <summary>The close guard: whether the window may close now.</summary>
+    public Task<bool> ConfirmCloseAsync() => _save.ConfirmCloseAsync();
 
     /// <summary>Reads the Edge's settings into a new, clean draft.</summary>
     public async Task LoadAsync(CancellationToken ct = default)
@@ -202,6 +228,11 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public Task ActivateAsync(TreeNode node)
     {
         ArgumentNullException.ThrowIfNull(node);
+        if (IsBusy)
+        {
+            return Task.CompletedTask;
+        }
+
         SelectedNode = node;
         SelectedTag = null; // the node's own dialog, even while a tag of that PLC is still selected in the grid
         return node.Kind == TreeNodeKind.AddChannel ? AddChannelAsync() : EditAsync();
@@ -254,7 +285,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     /// <summary>Removes the selected tag, or else the selected channel or PLC, from the draft after the confirmation.</summary>
     public async Task DeleteAsync()
     {
-        if (Draft is not { } draft)
+        if (!Ready || Draft is not { } draft)
         {
             return;
         }
@@ -281,9 +312,17 @@ public sealed class MainViewModel : INotifyPropertyChanged
             return;
         }
 
-        if (!await _prompts.ConfirmAsync(message).ConfigureAwait(true))
+        _openDialogs++;
+        try
         {
-            return;
+            if (!await _prompts.ConfirmAsync(message).ConfigureAwait(true))
+            {
+                return;
+            }
+        }
+        finally
+        {
+            _openDialogs--;
         }
 
         try
@@ -301,7 +340,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     /// <summary>Kiểm tra cấu hình: validates the draft and logs each error at its node (or its path), or "Hợp lệ".</summary>
     public async Task CheckAsync()
     {
-        if (Draft is not { } draft)
+        if (!Ready || Draft is not { } draft)
         {
             return;
         }
@@ -359,6 +398,11 @@ public sealed class MainViewModel : INotifyPropertyChanged
     /// <summary>Builds the dialog (which may meet a node no longer in the draft), shows it, then shows the draft again.</summary>
     private async Task OpenAsync(Func<DialogRequest> build)
     {
+        if (IsBusy)
+        {
+            return;
+        }
+
         DialogRequest request;
         try
         {
@@ -370,8 +414,46 @@ public sealed class MainViewModel : INotifyPropertyChanged
             return;
         }
 
-        await _dialogs.OpenAsync(request).ConfigureAwait(true);
+        _openDialogs++;
+        try
+        {
+            await _dialogs.OpenAsync(request).ConfigureAwait(true);
+        }
+        finally
+        {
+            _openDialogs--;
+        }
+
         DraftChanged();
+    }
+
+    /// <summary>The errors of validate or a refused save: one log entry each, and the first mappable node selected.</summary>
+    internal void ShowErrors(ConfigDraft draft, IReadOnlyList<ApiError> errors, string source)
+    {
+        foreach (var error in errors)
+        {
+            AddLog(source, Describe(draft, error));
+        }
+
+        if (errors.Select(e => draft.Locate(e.Path)).FirstOrDefault(at => at is not null) is { } first)
+        {
+            Select(first);
+        }
+    }
+
+    /// <summary>Selects the node of <paramref name="at"/> in the tree, and its tag in the grid.</summary>
+    internal void Select(ErrorLocation at)
+    {
+        SelectedNode = Tree.SelectMany(n => n.Children).FirstOrDefault(n => at.Device is not null && n.Device == at.Device)
+            ?? Tree.FirstOrDefault(n => n.Channel == at.Channel);
+        SelectedTag = at.Tag is null ? null : Tags.FirstOrDefault(r => r.Tag == at.Tag);
+    }
+
+    /// <summary>After the busy or waiting state changed: the Edge lost/back log the wait held back, and every text.</summary>
+    internal void Refresh()
+    {
+        UpdateEdgeLost();
+        Changed();
     }
 
     private DialogRequest Request(ChannelDialogViewModel dialog) => new(dialog, Guard(dialog.Apply));
@@ -430,14 +512,19 @@ public sealed class MainViewModel : INotifyPropertyChanged
             return;
         }
 
+        UpdateEdgeLost();
+        Changed();
+    }
+
+    private void UpdateEdgeLost()
+    {
+        // During this app's apply wait the monitor server restarts with the Edge: failed polls are expected, not news.
         var lost = Monitor.Banner is not null;
-        if (lost != _edgeLost)
+        if (lost != _edgeLost && !_save.IsWaiting)
         {
             _edgeLost = lost;
             AddLog("Edge", lost ? "Mất kết nối tới Edge" : "Đã kết nối lại Edge");
         }
-
-        Changed();
     }
 
     private void OnStatusApplied(object? sender, EventArgs e)
@@ -455,6 +542,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         UpdateStates();
         RefreshGrid();
         Changed();
+        _save.OnStatus(Monitor.LastStatus!);
     }
 
     /// <summary>Rebuilds the tree from the draft, keeping the selection on the same draft node while it still exists.</summary>
@@ -539,7 +627,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
             live?.Value ?? Dash, live?.Quality ?? Dash, live?.QualityKind ?? BadgeKind.Idle, live?.Time ?? Dash, live?.Error ?? "");
     }
 
-    private void AddLog(string source, string message)
+    internal void AddLog(string source, string message)
     {
         Log.Insert(0, new LogEntry(_time.GetLocalNow().ToString("HH:mm:ss", CultureInfo.InvariantCulture), source, message));
         while (Log.Count > LogLimit)
@@ -570,5 +658,5 @@ public sealed class MainViewModel : INotifyPropertyChanged
     }
 
     // The window re-reads every computed text and rule; they all follow from the draft, the selection and the monitor.
-    private void Changed() => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(null));
+    internal void Changed() => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(null));
 }

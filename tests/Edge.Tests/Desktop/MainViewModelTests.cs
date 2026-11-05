@@ -650,5 +650,11 @@ public class MainViewModelTests
             Confirmations.Add(message);
             return Task.FromResult(Answer);
         }
+
+        public Task<bool> AskReloadStaleAsync(string message) => throw new NotSupportedException();
+
+        public Task<CloseChoice> AskCloseAsync() => throw new NotSupportedException();
+
+        public Task<bool> AskExitWhileBusyAsync() => throw new NotSupportedException();
     }
 }

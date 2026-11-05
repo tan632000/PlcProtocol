@@ -9,6 +9,22 @@ public interface IUserPrompts
     Task<string?> AskPasswordAsync(string purpose);
 
     Task<bool> ConfirmAsync(string message);
+
+    /// <summary>A save refused as stale: true is Tải lại (bỏ thay đổi), false is Giữ để xem.</summary>
+    Task<bool> AskReloadStaleAsync(string message);
+
+    /// <summary>Closing with unsaved changes: Lưu / Không lưu / Huỷ.</summary>
+    Task<CloseChoice> AskCloseAsync();
+
+    /// <summary>Closing while a save runs: true is Thoát không chờ (the Edge finishes the apply on its own), false is Đợi.</summary>
+    Task<bool> AskExitWhileBusyAsync();
+}
+
+public enum CloseChoice
+{
+    Save,
+    DontSave,
+    Cancel,
 }
 
 /// <summary>

@@ -471,5 +471,11 @@ public class DialogViewModelTests
         }
 
         public Task<bool> ConfirmAsync(string message) => Task.FromResult(true);
+
+        public Task<bool> AskReloadStaleAsync(string message) => throw new NotSupportedException();
+
+        public Task<CloseChoice> AskCloseAsync() => throw new NotSupportedException();
+
+        public Task<bool> AskExitWhileBusyAsync() => throw new NotSupportedException();
     }
 }

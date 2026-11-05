@@ -198,6 +198,8 @@ public sealed class DeviceDialogViewModel : DialogViewModel
             return;
         }
 
+        // Cleared first, so a result equal to the last one still raises a change (the main window logs each one).
+        TestMessage = null;
         var connection = new PlcConnection(_channel.Driver, device.Model, device.Host, device.Port, device.Rack, device.Slot, device.TimeoutMs);
         var result = await _client.TestConnectionAsync(connection, password).ConfigureAwait(true);
         if (result.Refusal is null)

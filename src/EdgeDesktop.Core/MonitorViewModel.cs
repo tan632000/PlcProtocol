@@ -85,6 +85,12 @@ public sealed class MonitorViewModel(TimeProvider time) : INotifyPropertyChanged
 
     public ObservableCollection<TagRow> Tags { get; } = [];
 
+    /// <summary>The last status applied, for readers that need more than the shown texts (the settings window).</summary>
+    public EdgeStatus? LastStatus { get; private set; }
+
+    /// <summary>Raised at the end of <see cref="Apply"/>, once every text and row shows the new status.</summary>
+    public event EventHandler? StatusApplied;
+
     public void Apply(EdgeStatus status)
     {
         ArgumentNullException.ThrowIfNull(status);
@@ -123,6 +129,8 @@ public sealed class MonitorViewModel(TimeProvider time) : INotifyPropertyChanged
         Sync(Devices, [.. devices.Select(Row)]);
         Sync(Tags, [.. (status.Tags ?? []).Select(Row)]);
         Updated = "Cập nhật " + time.GetLocalNow().ToString("HH:mm:ss", CultureInfo.InvariantCulture);
+        LastStatus = status;
+        StatusApplied?.Invoke(this, EventArgs.Empty);
     }
 
     /// <summary>Shows the banner and keeps the last data, as the web monitor does.</summary>

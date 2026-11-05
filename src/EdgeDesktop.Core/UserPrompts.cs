@@ -11,6 +11,20 @@ public interface IUserPrompts
     Task<bool> ConfirmAsync(string message);
 }
 
+/// <summary>
+/// A dialog to show modally: its view model and what its buttons run. The main view model wraps these actions, so a
+/// failure in them is logged there and never reaches the window. <see cref="Ok"/> returns false while the dialog must
+/// stay open (a local error); on true the dialog closes, except a tag dialog in Add mode
+/// (<see cref="TagDialogViewModel.CloseAfterApply"/> false), which stays open for the next tag.
+/// </summary>
+public sealed record DialogRequest(DialogViewModel ViewModel, Func<bool> Ok, Func<Task>? Check = null, Func<Task>? TestConnection = null);
+
+/// <summary>Shows a dialog and completes when it closes; the window implements it, the tests script it.</summary>
+public interface IDialogOpener
+{
+    Task OpenAsync(DialogRequest request);
+}
+
 /// <summary>The confirmation texts, naming what goes with what is deleted.</summary>
 public static class Confirmations
 {

@@ -56,9 +56,58 @@ public sealed class TreeNode : INotifyPropertyChanged
     }
 }
 
-/// <summary>A row of the tag grid: the draft tag with its live reading, or dashes for a tag the Edge does not read yet.</summary>
-public sealed record GridRow(
-    DraftTag Tag, string Name, string Address, string DataType, string Access, string Value, string Quality, BadgeKind QualityKind, string Time, string Error);
+/// <summary>
+/// A row of the tag grid: the draft tag with its live reading, or dashes for a tag the Edge does not read yet. One row per
+/// draft tag, updated in place by each reading, so the grid keeps the row, its focus and its current cell.
+/// </summary>
+public sealed class GridRow : INotifyPropertyChanged
+{
+    internal GridRow(DraftTag tag) => Tag = tag;
+
+    public event PropertyChangedEventHandler? PropertyChanged;
+
+    public DraftTag Tag { get; }
+
+    public string Name { get; private set => Set(ref field, value); } = "";
+
+    public string Address { get; private set => Set(ref field, value); } = "";
+
+    public string DataType { get; private set => Set(ref field, value); } = "";
+
+    public string Access { get; private set => Set(ref field, value); } = "";
+
+    public string Value { get; private set => Set(ref field, value); } = "";
+
+    public string Quality { get; private set => Set(ref field, value); } = "";
+
+    public BadgeKind QualityKind { get; private set => Set(ref field, value); }
+
+    public string Time { get; private set => Set(ref field, value); } = "";
+
+    public string Error { get; private set => Set(ref field, value); } = "";
+
+    internal void Show(string access, string value, string quality, BadgeKind qualityKind, string time, string error)
+    {
+        Name = Tag.Name;
+        Address = Tag.Address;
+        DataType = Tag.DataType;
+        Access = access;
+        Value = value;
+        Quality = quality;
+        QualityKind = qualityKind;
+        Time = time;
+        Error = error;
+    }
+
+    private void Set<T>(ref T field, T value, [CallerMemberName] string? name = null)
+    {
+        if (!EqualityComparer<T>.Default.Equals(field, value))
+        {
+            field = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
+        }
+    }
+}
 
 public sealed record LogEntry(string Time, string Source, string Message);
 
@@ -456,9 +505,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
         Changed();
     }
 
-    private DialogRequest Request(ChannelDialogViewModel dialog) => new(dialog, Guard(dialog.Apply));
+    private DialogRequest Request(ChannelDialogViewModel dialog) => new(dialog, Guard(dialog, dialog.Apply));
 
-    private DialogRequest Request(TagDialogViewModel dialog) => new(dialog, Guard(dialog.Apply), Check: Guard(dialog.CheckAsync));
+    private DialogRequest Request(TagDialogViewModel dialog) => new(dialog, Guard(dialog, dialog.Apply), Check: Guard(dialog.CheckAsync));
 
     private DialogRequest Request(DeviceDialogViewModel dialog)
     {
@@ -469,11 +518,11 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 AddLog($"PLC {dialog.Name.Trim()}", $"Test kết nối: {result}");
             }
         };
-        return new(dialog, Guard(dialog.Apply), TestConnection: Guard(dialog.TestConnectionAsync));
+        return new(dialog, Guard(dialog, dialog.Apply), TestConnection: Guard(dialog.TestConnectionAsync));
     }
 
     /// <summary>OK/Áp dụng: a node gone from the draft is logged and the dialog closes, since nothing is left to edit.</summary>
-    private Func<bool> Guard(Func<bool> apply) => () =>
+    private Func<bool> Guard(DialogViewModel dialog, Func<bool> apply) => () =>
     {
         try
         {
@@ -488,6 +537,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         catch (InvalidOperationException)
         {
             AddLog("Cấu hình", Detached);
+            dialog.IsDetached = true;
             return true;
         }
     };
@@ -606,24 +656,44 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private void RefreshGrid()
     {
         var keep = SelectedTag?.Tag;
-        List<GridRow> rows = SelectedNode?.Device is { } device ? [.. device.Tags.Select(t => Row(device, t))] : [];
-        Sync(Tags, rows);
+        var device = SelectedNode?.Device;
+        IReadOnlyList<DraftTag> tags = device?.Tags ?? [];
+        for (var i = 0; i < tags.Count; i++)
+        {
+            // A row is replaced only when another draft tag takes its place; a newer reading updates it in place.
+            if (i >= Tags.Count)
+            {
+                Tags.Add(new GridRow(tags[i]));
+            }
+            else if (Tags[i].Tag != tags[i])
+            {
+                Tags[i] = new GridRow(tags[i]);
+            }
 
-        // The grid drops its selection when a selected row is replaced by a newer reading; put it back.
-        if (keep is not null)
+            Show(device!, Tags[i]);
+        }
+
+        while (Tags.Count > tags.Count)
+        {
+            Tags.RemoveAt(Tags.Count - 1);
+        }
+
+        // The grid drops its selection when the selected row is replaced (another PLC, a rebuilt draft); put it back.
+        if (keep is not null && SelectedTag?.Tag != keep)
         {
             SelectedTag = Tags.FirstOrDefault(r => r.Tag == keep);
         }
     }
 
-    private GridRow Row(DraftDevice device, DraftTag tag)
+    private void Show(DraftDevice device, GridRow row)
     {
+        var tag = row.Tag;
         // The Edge's TagId rule: the bare name with LegacyTagIds, else {Device}.{Name}.
         var tagId = device.LegacyTagIds ? tag.Name : $"{device.Name}.{tag.Name}";
         // The device too: two legacy PLCs may each have a tag of that name, saved on one and only drafted on the other.
         var live = Monitor.Tags.FirstOrDefault(t => t.TagId == tagId && t.Device == device.Name);
-        return new GridRow(
-            tag, tag.Name, tag.Address, tag.DataType, tag.Writable ? "Read/Write" : "Read Only",
+        row.Show(
+            tag.Writable ? "Read/Write" : "Read Only",
             live?.Value ?? Dash, live?.Quality ?? Dash, live?.QualityKind ?? BadgeKind.Idle, live?.Time ?? Dash, live?.Error ?? "");
     }
 
@@ -633,27 +703,6 @@ public sealed class MainViewModel : INotifyPropertyChanged
         while (Log.Count > LogLimit)
         {
             Log.RemoveAt(Log.Count - 1);
-        }
-    }
-
-    /// <summary>Brings <paramref name="target"/> to <paramref name="rows"/> by index, replacing only rows that changed.</summary>
-    private static void Sync<T>(ObservableCollection<T> target, IReadOnlyList<T> rows)
-    {
-        for (var i = 0; i < rows.Count; i++)
-        {
-            if (i >= target.Count)
-            {
-                target.Add(rows[i]);
-            }
-            else if (!EqualityComparer<T>.Default.Equals(target[i], rows[i]))
-            {
-                target[i] = rows[i];
-            }
-        }
-
-        while (target.Count > rows.Count)
-        {
-            target.RemoveAt(target.Count - 1);
         }
     }
 

@@ -17,6 +17,9 @@ public abstract class DialogViewModel : INotifyPropertyChanged
     /// <summary>Field name (as the Edge names it, e.g. <c>Port</c>, <c>Address</c>) → message.</summary>
     public IReadOnlyDictionary<string, string> FieldErrors { get; private set; } = new Dictionary<string, string>();
 
+    /// <summary>Set when OK met a node no longer in the draft: nothing is left to edit, so the dialog closes in any mode.</summary>
+    public bool IsDetached { get; internal set; }
+
     protected void SetErrors(Dictionary<string, string> errors)
     {
         FieldErrors = errors;

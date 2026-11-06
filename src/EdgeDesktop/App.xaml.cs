@@ -19,6 +19,11 @@ public partial class App : Application
             return;
         }
 
-        new MainWindow(options!).Show();
+        var settings = new SettingsClient(options!.Port);
+        var prompts = new WpfPrompts();
+        var main = new MainViewModel(new MonitorViewModel(TimeProvider.System), settings, prompts, prompts, TimeProvider.System, options.Port);
+        var window = new MainWindow(options, main);
+        window.Closed += (_, _) => settings.Dispose();
+        window.Show();
     }
 }

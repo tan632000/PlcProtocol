@@ -374,6 +374,34 @@ public class MainViewModelTests
     }
 
     [Fact]
+    public async Task AddTag_OnAPlcGoneFromTheDraft_MarksTheDialogDetached_SoItClosesEvenInAddMode()
+    {
+        App? app = null;
+        var detached = new List<bool>();
+        app = await StartAsync(dialog: request =>
+        {
+            var tag = (TagDialogViewModel)request.ViewModel;
+            tag.Name = "Extra";
+            tag.Address = "DB1.DBW8";
+            Assert.True(request.Ok());
+            detached.Add(tag.IsDetached);
+
+            // The PLC disappears from the draft while the dialog stays open for the next tag.
+            var draft = app!.Main.Draft!;
+            draft.RemoveDevice(draft.Channels[0].Devices[0]);
+            tag.Name = "Other";
+            Assert.True(request.Ok());
+            detached.Add(tag.IsDetached);
+            return Task.CompletedTask;
+        });
+        app.Main.SelectedNode = Node(app.Main, "Line");
+
+        await app.Main.AddTagAsync();
+
+        Assert.Equal([false, true], detached);
+    }
+
+    [Fact]
     public async Task EditOfATagNoLongerInTheDraft_IsLogged_NotThrown()
     {
         var app = await StartAsync();
@@ -504,6 +532,26 @@ public class MainViewModelTests
 
         Assert.Same(app.Main.Tags[1], app.Main.SelectedTag);
         Assert.Equal("30", app.Main.SelectedTag!.Value);
+    }
+
+    [Fact]
+    public async Task ANewerReading_UpdatesTheRowsInPlace_SoTheGridKeepsItsRowsAndFocus()
+    {
+        var app = await StartAsync();
+        app.Monitor.Apply(Status());
+        app.Main.SelectedNode = Node(app.Main, "Line");
+        var rows = app.Main.Tags.ToList();
+        var replaced = 0;
+        app.Main.Tags.CollectionChanged += (_, _) => replaced++;
+        var changed = new List<string?>();
+        rows[1].PropertyChanged += (_, e) => changed.Add(e.PropertyName);
+
+        app.Monitor.Apply(Status(tags: [Tag("Line.Speed", "Line", "12"), Tag("Line.Temp", "Line", "31")]));
+
+        Assert.Equal(0, replaced);
+        Assert.Equal(rows, app.Main.Tags); // the same objects
+        Assert.Equal("31", rows[1].Value);
+        Assert.Contains(nameof(GridRow.Value), changed);
     }
 
     [Fact]

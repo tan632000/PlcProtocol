@@ -1,0 +1,116 @@
+<Window x:Class="IndustrialIot.EdgeDesktop.DeviceDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        SizeToContent="WidthAndHeight" ResizeMode="NoResize" WindowStartupLocation="CenterOwner" ShowInTaskbar="False"
+        FontFamily="Segoe UI" FontSize="12" FocusManager.FocusedElement="{Binding ElementName=NameBox}">
+  <!-- Add or edit a PLC (plan D-05): only the models of the channel's driver; Rack/Slot for S7; writes where allowed. -->
+  <Window.Resources>
+    <BooleanToVisibilityConverter x:Key="Visible" />
+    <Style x:Key="Label" TargetType="TextBlock">
+      <Setter Property="Width" Value="120" />
+      <Setter Property="Margin" Value="0,3,8,0" />
+    </Style>
+    <Style x:Key="Field" TargetType="DockPanel">
+      <Setter Property="Margin" Value="0,0,0,8" />
+    </Style>
+    <Style x:Key="Note" TargetType="TextBlock">
+      <Setter Property="Foreground" Value="#667085" />
+      <Setter Property="TextWrapping" Value="Wrap" />
+      <Setter Property="Margin" Value="0,2,0,0" />
+      <Style.Triggers>
+        <Trigger Property="Text" Value="">
+          <Setter Property="Visibility" Value="Collapsed" />
+        </Trigger>
+      </Style.Triggers>
+    </Style>
+    <Style x:Key="Error" TargetType="TextBlock" BasedOn="{StaticResource Note}">
+      <Setter Property="Foreground" Value="#C62828" />
+    </Style>
+  </Window.Resources>
+
+  <StackPanel Margin="14" Width="440">
+    <DockPanel Style="{StaticResource Field}">
+      <TextBlock Style="{StaticResource Label}" Text="Tên PLC:" />
+      <StackPanel>
+        <TextBox x:Name="NameBox" Text="{Binding Name, UpdateSourceTrigger=PropertyChanged}" />
+        <TextBlock Style="{StaticResource Error}" Text="{Binding FieldErrors[Name]}" />
+      </StackPanel>
+    </DockPanel>
+
+    <DockPanel Style="{StaticResource Field}">
+      <TextBlock Style="{StaticResource Label}" Text="Dòng PLC:" />
+      <StackPanel>
+        <ComboBox ItemsSource="{Binding Models}" DisplayMemberPath="Name" SelectedValuePath="Name" SelectedValue="{Binding Model}" />
+        <TextBlock Style="{StaticResource Note}" Text="{Binding PortHint}" />
+        <TextBlock Style="{StaticResource Error}" Text="{Binding FieldErrors[Model]}" />
+      </StackPanel>
+    </DockPanel>
+
+    <DockPanel Style="{StaticResource Field}">
+      <TextBlock Style="{StaticResource Label}" Text="Địa chỉ IP:" />
+      <StackPanel>
+        <TextBox Text="{Binding Host, UpdateSourceTrigger=PropertyChanged}" />
+        <TextBlock Style="{StaticResource Error}" Text="{Binding FieldErrors[Host]}" />
+      </StackPanel>
+    </DockPanel>
+
+    <DockPanel Style="{StaticResource Field}">
+      <TextBlock Style="{StaticResource Label}" Text="Port:" />
+      <StackPanel>
+        <TextBox Text="{Binding PortText, UpdateSourceTrigger=PropertyChanged}" />
+        <TextBlock Style="{StaticResource Error}" Text="{Binding FieldErrors[Port]}" />
+      </StackPanel>
+    </DockPanel>
+
+    <DockPanel Style="{StaticResource Field}" Visibility="{Binding IsS7, Converter={StaticResource Visible}}">
+      <TextBlock Style="{StaticResource Label}" Text="Rack:" />
+      <StackPanel>
+        <TextBox Text="{Binding RackText, UpdateSourceTrigger=PropertyChanged}" />
+        <TextBlock Style="{StaticResource Error}" Text="{Binding FieldErrors[Rack]}" />
+      </StackPanel>
+    </DockPanel>
+
+    <DockPanel Style="{StaticResource Field}" Visibility="{Binding IsS7, Converter={StaticResource Visible}}">
+      <TextBlock Style="{StaticResource Label}" Text="Slot:" />
+      <StackPanel>
+        <TextBox Text="{Binding SlotText, UpdateSourceTrigger=PropertyChanged}" />
+        <TextBlock Style="{StaticResource Error}" Text="{Binding FieldErrors[Slot]}" />
+      </StackPanel>
+    </DockPanel>
+
+    <DockPanel Style="{StaticResource Field}">
+      <TextBlock Style="{StaticResource Label}" Text="Timeout (ms):" />
+      <StackPanel>
+        <TextBox Text="{Binding TimeoutText, UpdateSourceTrigger=PropertyChanged}" />
+        <TextBlock Style="{StaticResource Error}" Text="{Binding FieldErrors[TimeoutMs]}" />
+      </StackPanel>
+    </DockPanel>
+
+    <DockPanel Style="{StaticResource Field}">
+      <TextBlock Style="{StaticResource Label}" Text="Chu kỳ đọc (ms):" />
+      <StackPanel>
+        <TextBox Text="{Binding PollText, UpdateSourceTrigger=PropertyChanged}" />
+        <TextBlock Style="{StaticResource Error}" Text="{Binding FieldErrors[PollIntervalMs]}" />
+      </StackPanel>
+    </DockPanel>
+
+    <StackPanel Margin="128,0,0,0">
+      <CheckBox Content="Đọc" IsChecked="{Binding Enabled}" Margin="0,0,0,6" />
+      <CheckBox Content="Cho phép ghi" IsChecked="{Binding WritesEnabled}" IsEnabled="{Binding CanEnableWrites}" />
+      <TextBlock Style="{StaticResource Note}" Text="{Binding WritesNote}" />
+      <CheckBox Content="TagId giữ nguyên tên cũ" IsChecked="{Binding LegacyTagIds}" Margin="0,6,0,0"
+                Visibility="{Binding ShowLegacyTagIds, Converter={StaticResource Visible}}" />
+      <TextBlock Style="{StaticResource Error}" Text="{Binding LegacyTagIdsWarning}" />
+      <TextBlock Text="{Binding TestMessage}" FontWeight="SemiBold" TextWrapping="Wrap" Margin="0,8,0,0" />
+    </StackPanel>
+
+    <DockPanel Margin="0,14,0,0">
+      <Button x:Name="TestButton" Content="Test kết nối" Padding="10,0" Click="OnTest"
+              ToolTip="Thử kết nối tới PLC với các giá trị đang nhập (cần mật khẩu settings)" />
+      <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+        <Button Content="OK" Width="80" IsDefault="True" Click="OnOk" />
+        <Button Content="Huỷ" Width="80" Margin="8,0,0,0" IsCancel="True" />
+      </StackPanel>
+    </DockPanel>
+  </StackPanel>
+</Window>
